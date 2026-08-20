@@ -93,15 +93,20 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.PublicBaseURL == "" {
 		return config{}, errors.New("MEDIA_PUBLIC_BASE_URL is required")
 	}
+	// Never echo the raw value into errors: it may carry credentials.
 	u, err := url.Parse(cfg.PublicBaseURL)
 	if err != nil {
-		return config{}, fmt.Errorf("MEDIA_PUBLIC_BASE_URL %q is invalid: %w", cfg.PublicBaseURL, err)
+		// url.Parse errors embed the raw URL — do not wrap them.
+		return config{}, errors.New("MEDIA_PUBLIC_BASE_URL is not a valid URL")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return config{}, fmt.Errorf("MEDIA_PUBLIC_BASE_URL must use http or https, got %q", cfg.PublicBaseURL)
+		return config{}, fmt.Errorf("MEDIA_PUBLIC_BASE_URL must use http or https, got scheme %q", u.Scheme)
 	}
 	if u.Host == "" {
-		return config{}, fmt.Errorf("MEDIA_PUBLIC_BASE_URL %q has no host", cfg.PublicBaseURL)
+		return config{}, errors.New("MEDIA_PUBLIC_BASE_URL has no host")
+	}
+	if u.User != nil {
+		return config{}, errors.New("MEDIA_PUBLIC_BASE_URL must not contain userinfo (credentials are not allowed)")
 	}
 
 	roots := getenv("MEDIA_ROOTS")
@@ -178,8 +183,20 @@ func (c config) logValue() slog.Value {
 }
 
 // run starts both HTTP servers and blocks until ctx is cancelled or a
-// server fails, then shuts both down gracefully.
+// server fails, then shuts both down gracefully. A server failure is
+// returned as an error so main exits non-zero.
 func run(ctx context.Context, cfg config) error {
+	// Fail fast on missing or non-directory media roots.
+	for _, root := range cfg.Roots {
+		fi, err := os.Stat(root)
+		if err != nil {
+			return fmt.Errorf("media root %q: %w", root, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("media root %q is not a directory", root)
+		}
+	}
+
 	mintHandler, err := mint.NewHandler(mint.Config{
 		Secret:        cfg.Secret,
 		Token:         cfg.Token,
@@ -207,12 +224,14 @@ func run(ctx context.Context, cfg config) error {
 		}()
 	}
 
+	var runErr error
 	select {
 	case <-ctx.Done():
 		slog.Info("shutdown requested", "reason", ctx.Err())
 	case err := <-errCh:
 		// A server died: shut the other one down as well and report.
 		slog.Error("server failed, shutting down", "err", err)
+		runErr = err
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -223,15 +242,7 @@ func run(ctx context.Context, cfg config) error {
 			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("%s server shutdown: %w", name, err))
 		}
 	}
-	if shutdownErr != nil {
-		return shutdownErr
-	}
-	select {
-	case err := <-errCh:
-		return err
-	default:
-		return nil
-	}
+	return errors.Join(runErr, shutdownErr)
 }
 
 func main() {

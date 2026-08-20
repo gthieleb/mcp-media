@@ -21,4 +21,8 @@ COPY --from=build /media-sidecar /media-sidecar
 # 8090: public signed-URL file server; 8091: internal mint API.
 EXPOSE 8090 8091
 
+# Run as the distroless nonroot user explicitly — guards against a base
+# image tag mistake silently reverting to root.
+USER 65532:65532
+
 ENTRYPOINT ["/media-sidecar"]

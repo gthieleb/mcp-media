@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +95,12 @@ func TestLoadConfigErrors(t *testing.T) {
 		"base url bad proto": func(env map[string]string) {
 			env["MEDIA_PUBLIC_BASE_URL"] = "ftp://example.com"
 		},
+		"base url with userinfo": func(env map[string]string) {
+			env["MEDIA_PUBLIC_BASE_URL"] = "https://user:s3cr3tPW@example.com"
+		},
+		"base url parse error": func(env map[string]string) {
+			env["MEDIA_PUBLIC_BASE_URL"] = "http://exa mple.com/media"
+		},
 		"relative root":     func(env map[string]string) { env["MEDIA_ROOTS"] = "data" },
 		"empty roots":       func(env map[string]string) { env["MEDIA_ROOTS"] = " , " },
 		"bad default ttl":   func(env map[string]string) { env["MEDIA_DEFAULT_TTL"] = "soon" },
@@ -139,5 +148,155 @@ func TestConfigLogValueRedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(logged, "secret_bytes=32") || !strings.Contains(logged, "token_bytes=10") {
 		t.Errorf("expected length-only secret info, got %q", logged)
+	}
+}
+
+// Regression test for review I2: userinfo credentials in
+// MEDIA_PUBLIC_BASE_URL must be rejected outright.
+func TestLoadConfigRejectsUserinfoBaseURL(t *testing.T) {
+	env := validEnv()
+	env["MEDIA_PUBLIC_BASE_URL"] = "https://user:s3cr3tPW@example.com"
+
+	if _, err := loadConfig(envStub(env)); err == nil {
+		t.Fatal("loadConfig accepted a base URL with userinfo credentials")
+	}
+}
+
+// Regression test for review I2: the raw MEDIA_PUBLIC_BASE_URL value must
+// never be echoed into error messages — it may carry credentials.
+func TestLoadConfigBaseURLErrorsDoNotLeak(t *testing.T) {
+	const marker = "s3cr3tPW"
+	cases := map[string]string{
+		"userinfo rejected": "https://user:" + marker + "@example.com",
+		"parse error":       "http://exa mple.com/" + marker,
+		"bad scheme":        "ftp://" + marker + ".example.com",
+		"no host":           "https://user:" + marker + "@",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := validEnv()
+			env["MEDIA_PUBLIC_BASE_URL"] = raw
+			_, err := loadConfig(envStub(env))
+			if err == nil {
+				t.Fatalf("loadConfig accepted %q, want error", name)
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Fatalf("error leaks base-URL credential material: %v", err)
+			}
+		})
+	}
+}
+
+// --- run() lifecycle tests (review I3) -------------------------------------
+
+// testConfig builds a valid run() configuration on loopback with
+// OS-assigned free ports and a temp media root (hermetic, no fixed ports).
+func testConfig(t *testing.T) config {
+	t.Helper()
+	return config{
+		Secret:        []byte(strings.Repeat("s", 32)),
+		Token:         "test-token",
+		PublicBaseURL: "http://localhost:8090",
+		Roots:         []string{t.TempDir()},
+		ServeAddr:     freeAddr(t),
+		MintAddr:      freeAddr(t),
+		DefaultTTL:    300 * time.Second,
+		MaxTTL:        900 * time.Second,
+	}
+}
+
+// freeAddr finds a free loopback address by binding :0 and closing.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve free port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().String()
+}
+
+// waitForPort polls addr until it accepts a TCP connection or the deadline
+// expires (polling with deadline, no fixed sleep).
+func waitForPort(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("addr %s did not accept connections within 2s", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunHappyPathShutdownOnCancel(t *testing.T) {
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(ctx, cfg) }()
+
+	waitForPort(t, cfg.ServeAddr)
+	waitForPort(t, cfg.MintAddr)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned %v, want nil on clean shutdown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return within 2s of context cancel")
+	}
+}
+
+// Regression test for review I1: a failing server must surface as a
+// non-nil run() error (pre-fix run returned nil → process exit code 0).
+func TestRunReturnsErrorOnServerFailure(t *testing.T) {
+	cfg := testConfig(t)
+	// Pre-occupy the serve port so the serve server fails to bind.
+	l, err := net.Listen("tcp", cfg.ServeAddr)
+	if err != nil {
+		t.Fatalf("pre-occupy serve port: %v", err)
+	}
+	defer l.Close()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(context.Background(), cfg) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("run returned nil although the serve server failed to bind")
+		}
+		if !strings.Contains(err.Error(), "serve server") {
+			t.Errorf("error %v does not name the failing server", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return within 2s of the server failure")
+	}
+}
+
+// Regression test for review M2: run must fail fast on a missing root.
+func TestRunFailsOnMissingRoot(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Roots = []string{filepath.Join(t.TempDir(), "does-not-exist")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(ctx, cfg) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("run returned nil with a nonexistent media root")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not fail fast on a nonexistent media root")
 	}
 }
