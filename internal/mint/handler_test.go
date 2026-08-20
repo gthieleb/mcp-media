@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gthieleb/mcp-media/internal/serve"
 	"github.com/gthieleb/mcp-media/internal/sign"
 )
 
@@ -235,6 +236,22 @@ func TestMintTTL(t *testing.T) {
 		}
 		assertExpWithin(t, parseMinted(t, rec).exp, before, after, 900*time.Second)
 	})
+
+	// Regression: time.Duration(ttl_seconds) * time.Second overflows
+	// int64 for huge values and must not bypass the max-TTL clamp.
+	// (1<<55 and 1<<62 both wrap to 0 nanoseconds; other huge values may
+	// wrap to small positive or negative durations.)
+	for _, ttlSec := range []int64{1 << 55, 1 << 62} {
+		t.Run(fmt.Sprintf("overflow ttl_seconds=%d clamps to max", ttlSec), func(t *testing.T) {
+			before := time.Now()
+			rec := postJSON(t, h, fmt.Sprintf(`{"path": %q, "ttl_seconds": %d}`, file, ttlSec))
+			after := time.Now()
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d (body %q)", rec.Code, rec.Body.String())
+			}
+			assertExpWithin(t, parseMinted(t, rec).exp, before, after, 900*time.Second)
+		})
+	}
 }
 
 func TestMintBadRequest(t *testing.T) {
@@ -292,11 +309,31 @@ func TestMintUnauthorized(t *testing.T) {
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401 (body %q)", rec.Code, rec.Body.String())
 			}
+			// RFC 7235: a 401 response must carry a WWW-Authenticate challenge.
+			if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+				t.Errorf("WWW-Authenticate = %q, want %q", got, "Bearer")
+			}
 			// The 401 body must be generic: no token, no reason hints.
 			if strings.Contains(rec.Body.String(), testToken) {
 				t.Errorf("401 body leaks the token: %q", rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestAuthLowercaseBearerScheme locks in that the auth scheme match is
+// case-insensitive (RFC 7235 allows any case for the scheme).
+func TestAuthLowercaseBearerScheme(t *testing.T) {
+	root, file := newRoot(t)
+	h := newTestHandler(t, []string{root})
+
+	req := httptest.NewRequest(http.MethodPost, "/mint", strings.NewReader(fmt.Sprintf(`{"path": %q}`, file)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -505,6 +542,8 @@ func TestNewHandlerValidation(t *testing.T) {
 		{"negative default ttl", func(c *Config) { c.DefaultTTL = -time.Second }},
 		{"max below default", func(c *Config) { c.MaxTTL = c.DefaultTTL - time.Second }},
 		{"zero max ttl", func(c *Config) { c.MaxTTL = 0 }},
+		{"nil roots", func(c *Config) { c.Roots = nil }},
+		{"empty roots", func(c *Config) { c.Roots = []string{} }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -521,4 +560,107 @@ func TestNewHandlerValidation(t *testing.T) {
 			t.Errorf("NewHandler: unexpected error: %v", err)
 		}
 	})
+}
+
+// TestMintDirectoryRejected: directories resolve fine through
+// serve.Resolve (they exist) but must not be minted — a signed URL for a
+// directory would only 404 at serve time.
+func TestMintDirectoryRejected(t *testing.T) {
+	root, _ := newRoot(t)
+	h := newTestHandler(t, []string{root})
+
+	for _, dir := range []string{root, filepath.Join(root, "sub")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			rec := postJSON(t, h, fmt.Sprintf(`{"path": %q}`, dir))
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestMintServeRoundTrip locks the cross-package URL contract between
+// internal/mint and internal/serve: a URL minted by POST /mint must be
+// accepted verbatim by the media file server, and an expired URL built
+// with the same URL/parameter/signature format must be rejected with 403.
+func TestMintServeRoundTrip(t *testing.T) {
+	root, file := newRoot(t)
+	want, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mintH := newTestHandler(t, []string{root})
+	serveH := serve.NewHandler(testSecret, []string{root})
+
+	t.Run("minted url serves the file", func(t *testing.T) {
+		rec := postJSON(t, mintH, fmt.Sprintf(`{"path": %q, "ttl_seconds": 60}`, file))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("mint status = %d (body %q)", rec.Code, rec.Body.String())
+		}
+		m := parseMinted(t, rec)
+
+		u, err := url.Parse(m.raw)
+		if err != nil {
+			t.Fatalf("parse minted url: %v", err)
+		}
+		// Replay path+query verbatim against the serve handler.
+		get := httptest.NewRequest(http.MethodGet, u.RequestURI(), nil)
+		srec := httptest.NewRecorder()
+		serveH.ServeHTTP(srec, get)
+
+		if srec.Code != http.StatusOK {
+			t.Fatalf("serve status = %d, want 200 (body %q)", srec.Code, srec.Body.String())
+		}
+		if got := srec.Body.Bytes(); !bytes.Equal(got, want) {
+			t.Errorf("served bytes = %q, want %q", got, want)
+		}
+		if cd := srec.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="foo.ogg"`) {
+			t.Errorf("Content-Disposition = %q, want filename foo.ogg", cd)
+		}
+	})
+
+	t.Run("expired url is rejected with 403", func(t *testing.T) {
+		// Build an expired URL with the exact mint URL format, signed via
+		// internal/sign with a past exp.
+		resolved, err := filepath.EvalSymlinks(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pathB64 := base64.RawURLEncoding.EncodeToString([]byte(resolved))
+		exp := time.Now().Add(-time.Minute).Unix()
+		sig := sign.Sign(testSecret, pathB64, exp, "attachment")
+		rawURL := "/media/" + pathB64 + "/foo.ogg?exp=" + strconv.FormatInt(exp, 10) +
+			"&d=attachment&sig=" + sig
+
+		get := httptest.NewRequest(http.MethodGet, rawURL, nil)
+		srec := httptest.NewRecorder()
+		serveH.ServeHTTP(srec, get)
+		if srec.Code != http.StatusForbidden {
+			t.Errorf("serve status = %d, want 403 (body %q)", srec.Code, srec.Body.String())
+		}
+	})
+}
+
+// TestNewHandlerClonesRoots ensures later mutation of the caller's Roots
+// slice cannot change the handler's fencing configuration (same treatment
+// as Secret).
+func TestNewHandlerClonesRoots(t *testing.T) {
+	root, file := newRoot(t)
+	roots := []string{root}
+	cfg := testConfig(roots)
+	h, err := NewHandler(cfg)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	// Mutate the caller's slice after construction; the handler must be
+	// unaffected (minting under the original root still works).
+	roots[0] = t.TempDir()
+	rec := postJSON(t, h, fmt.Sprintf(`{"path": %q}`, file))
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: handler roots must be a clone (body %q)", rec.Code, rec.Body.String())
+	}
 }

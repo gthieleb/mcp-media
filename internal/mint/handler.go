@@ -97,11 +97,14 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	if cfg.MaxTTL < cfg.DefaultTTL {
 		return nil, fmt.Errorf("mint: max TTL %s must be >= default TTL %s", cfg.MaxTTL, cfg.DefaultTTL)
 	}
+	if len(cfg.Roots) == 0 {
+		return nil, errors.New("mint: at least one root is required")
+	}
 	return &handler{
 		secret:  slices.Clone(cfg.Secret),
 		token:   []byte(cfg.Token),
 		baseURL: strings.TrimRight(cfg.PublicBaseURL, "/"),
-		roots:   cfg.Roots,
+		roots:   slices.Clone(cfg.Roots),
 		defTTL:  cfg.DefaultTTL,
 		maxTTL:  cfg.MaxTTL,
 	}, nil
@@ -133,7 +136,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		// Generic 401: never reveal whether the token was absent,
 		// malformed or wrong. Presented credentials are never logged.
+		// RFC 7235: a 401 response must carry a WWW-Authenticate challenge.
 		slog.Warn("mint: unauthorized request", "remote", r.RemoteAddr)
+		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -188,11 +193,15 @@ func (h *handler) mint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ttl_seconds must not be negative")
 		return
 	}
+	// Clamp in SECONDS before converting: time.Duration(seconds) *
+	// time.Second overflows int64 for huge values and could wrap to a
+	// duration below maxTTL, silently bypassing the clamp.
 	ttl := h.defTTL
 	if req.TTLSeconds > 0 {
-		ttl = time.Duration(req.TTLSeconds) * time.Second
-		if ttl > h.maxTTL {
+		if maxSec := int64(h.maxTTL / time.Second); req.TTLSeconds >= maxSec {
 			ttl = h.maxTTL
+		} else {
+			ttl = time.Duration(req.TTLSeconds) * time.Second
 		}
 	}
 
@@ -210,6 +219,24 @@ func (h *handler) mint(w http.ResponseWriter, r *http.Request) {
 			slog.Error("mint: resolve failed", "path", req.Path, "err", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
 		}
+		return
+	}
+
+	// Directories resolve fine (they exist) but must not be minted: a
+	// signed URL for a directory would only 404 at serve time.
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Info("mint: path vanished after resolve", "path", req.Path)
+			writeError(w, http.StatusNotFound, "not found")
+		} else {
+			slog.Error("mint: stat failed", "path", req.Path, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	if fi.IsDir() {
+		writeError(w, http.StatusBadRequest, "path is a directory")
 		return
 	}
 
