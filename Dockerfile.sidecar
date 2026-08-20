@@ -1,0 +1,24 @@
+# Dockerfile.sidecar — media-sidecar (cmd/media-sidecar), T1.8.
+#
+# Multi-stage build: compile with the Go toolchain image, ship a static
+# binary in a distroless nonroot image (uid 65532, no shell, no package
+# manager).
+
+FROM golang:1.25 AS build
+WORKDIR /workspace
+
+# Layer caching: module download depends only on go.mod/go.sum.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" \
+    -o /media-sidecar ./cmd/media-sidecar
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /media-sidecar /media-sidecar
+
+# 8090: public signed-URL file server; 8091: internal mint API.
+EXPOSE 8090 8091
+
+ENTRYPOINT ["/media-sidecar"]

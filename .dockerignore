@@ -1,0 +1,38 @@
+# VCS / CI
+.git/
+.github/
+
+# Docs
+docs/
+*.md
+LICENSE
+
+# Local tooling (the image build must not depend on host wrappers)
+scripts/
+
+# Agent artifacts / editor
+.sisyphus/
+.hermes/
+.opencode/
+.idea/
+.vscode/
+*.swp
+
+# Secrets / local config
+.env
+.env.*
+*.key
+*.pem
+*.bak
+
+# Build/test artifacts
+*.test
+*.out
+coverage.out
+cover.out
+dist/
+docker-compose.override.yml
+
+# Docker build files themselves
+Dockerfile.*
+.dockerignore
