@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Placeholder job — will be replaced by the full layered suite
+  # (unit / envtest / e2e-kind / e2e-k3s) once Wave 1+ land Go code.
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go version
+      # Unit + envtest + e2e jobs will be wired in Wave 4.

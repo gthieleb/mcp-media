@@ -1,0 +1,25 @@
+# Go
+*.test
+*.out
+coverage.out
+cover.out
+dist/
+
+# Local config / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.bak
+docker-compose.override.yml
+
+# Agent artifacts
+.sisyphus/
+.hermes/
+.opencode/
+
+# Editor
+.idea/
+.vscode/
+*.swp
