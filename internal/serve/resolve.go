@@ -34,6 +34,11 @@ var ErrEscape = errors.New("path escapes all configured roots")
 //     returns an error wrapping os.ErrNotExist (HTTP layer: 404), which is
 //     distinguishable from ErrEscape (403) via errors.Is.
 //
+// TOCTOU note: the validation above is point-in-time. Callers MUST open
+// the returned resolved path (never re-walk the original input) to shrink
+// the race window; under the read-only-volume threat model the residual
+// race (e.g. a symlink swap between Resolve and Open) is acceptable.
+//
 // Return value is the fully symlink-resolved absolute path on success.
 func Resolve(roots []string, p string) (string, error) {
 	clean := filepath.Clean(p)
