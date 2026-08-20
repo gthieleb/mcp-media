@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# dgofumpt — gofumpt inside Docker (no host Go required).
+#
+# Usage:
+#   scripts/dgofumpt -l .        # list files needing formatting
+#   scripts/dgofumpt -w .        # format in place
+set -euo pipefail
+
+IMAGE="${DGO_IMAGE:-golang:1.25}"
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+GOFUMPT_VERSION="${GOFUMPT_VERSION:-v0.9.2}"
+
+exec docker run --rm \
+  -v "${ROOT}:/workspace" \
+  -w /workspace \
+  -v mcp-media-gomod:/go/pkg/mod \
+  -v mcp-media-gocache:/root/.cache/go-build \
+  --entrypoint /bin/sh \
+  "${IMAGE}" -c "GOBIN=/tmp/bin go install mvdan.cc/gofumpt@${GOFUMPT_VERSION} >/dev/null 2>&1 && exec /tmp/bin/gofumpt \"\$@\"" -- "$@"

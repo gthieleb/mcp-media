@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# dgo — run the Go toolchain inside Docker (no host Go required).
+#
+# Usage:
+#   scripts/dgo test ./...
+#   scripts/dgo build ./cmd/example-mcp
+#   scripts/dgo mod tidy
+#
+# Named volumes keep the module and build caches across runs.
+set -euo pipefail
+
+IMAGE="${DGO_IMAGE:-golang:1.25}"
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+
+exec docker run --rm \
+  -v "${ROOT}:/workspace" \
+  -w /workspace \
+  -v mcp-media-gomod:/go/pkg/mod \
+  -v mcp-media-gocache:/root/.cache/go-build \
+  -e CGO_ENABLED=0 \
+  -e GOFLAGS=-mod=mod \
+  "${IMAGE}" go "$@"
