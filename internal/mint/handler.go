@@ -6,6 +6,22 @@
 // internal/sign. Path fencing is delegated to internal/serve BEFORE
 // minting, so escaping or missing paths never produce a signed URL.
 //
+// Success response contract (HTTP 200, application/json):
+//
+//	{
+//	  "url":        "<publicBaseURL>/media/<pathB64>/<filename>?exp=<unix>&d=<disposition>&sig=<sig>",
+//	  "expires_at": "<RFC3339 UTC expiry, equals the exp query parameter>",
+//	  "size_bytes": 1234,
+//	  "mime_type":  "audio/ogg"
+//	}
+//
+// size_bytes is the file size from the os.Stat the handler already
+// performs for directory rejection. mime_type is resolved via
+// internal/mime.For (extension first, then content sniffing, falling
+// back to application/octet-stream). The Wave-2 proxy — which has no
+// volume access in the split topology — uses size_bytes and mime_type
+// to build enriched structuredContent without statting files itself.
+//
 // Security properties:
 //   - Bearer-token auth (MEDIA_INTERNAL_TOKEN) compared in constant time;
 //     401 responses are generic and never hint at the failure reason.
@@ -35,6 +51,7 @@ import (
 	"strings"
 	"time"
 
+	mediamime "github.com/gthieleb/mcp-media/internal/mime"
 	"github.com/gthieleb/mcp-media/internal/serve"
 	"github.com/gthieleb/mcp-media/internal/sign"
 )
@@ -121,6 +138,8 @@ type mintRequest struct {
 type mintResponse struct {
 	URL       string `json:"url"`
 	ExpiresAt string `json:"expires_at"`
+	SizeBytes int64  `json:"size_bytes"`
+	MimeType  string `json:"mime_type"`
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -255,6 +274,8 @@ func (h *handler) mint(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(mintResponse{
 		URL:       minted,
 		ExpiresAt: exp.UTC().Format(time.RFC3339),
+		SizeBytes: fi.Size(),
+		MimeType:  mediamime.For(resolved),
 	})
 }
 

@@ -77,6 +77,8 @@ type mintedURL struct {
 	exp         int64
 	disposition string
 	sig         string
+	sizeBytes   int64
+	mimeType    string
 }
 
 // parseMinted decodes the mint response body and dissects the minted URL.
@@ -85,6 +87,8 @@ func parseMinted(t *testing.T, rec *httptest.ResponseRecorder) mintedURL {
 	var resp struct {
 		URL       string `json:"url"`
 		ExpiresAt string `json:"expires_at"`
+		SizeBytes int64  `json:"size_bytes"`
+		MimeType  string `json:"mime_type"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v (body %q)", err, rec.Body.String())
@@ -121,6 +125,8 @@ func parseMinted(t *testing.T, rec *httptest.ResponseRecorder) mintedURL {
 		exp:         exp,
 		disposition: q.Get("d"),
 		sig:         q.Get("sig"),
+		sizeBytes:   resp.SizeBytes,
+		mimeType:    resp.MimeType,
 	}
 }
 
@@ -174,6 +180,19 @@ func TestMintHappyPath(t *testing.T) {
 		t.Errorf("filename = %q, want foo.ogg", m.filename)
 	}
 
+	// size_bytes must match the fixture file size (len("ogg-bytes") == 9).
+	fi, err := os.Stat(file)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	if m.sizeBytes != fi.Size() {
+		t.Errorf("size_bytes = %d, want %d", m.sizeBytes, fi.Size())
+	}
+	// mime_type comes from the extension mapping for .ogg.
+	if m.mimeType != "audio/ogg" {
+		t.Errorf("mime_type = %q, want audio/ogg", m.mimeType)
+	}
+
 	assertExpWithin(t, m.exp, before, after, 60*time.Second)
 
 	// The signature must verify against the tuple (pathB64, exp, disposition).
@@ -183,6 +202,30 @@ func TestMintHappyPath(t *testing.T) {
 
 	if !strings.HasPrefix(m.raw, testBaseURL+"/media/") {
 		t.Errorf("url %q does not start with %q", m.raw, testBaseURL+"/media/")
+	}
+}
+
+// TestMintMimeTypeFromSniffing: a file with an unknown extension must
+// get its mime_type from content sniffing, with the correct size_bytes.
+func TestMintMimeTypeFromSniffing(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("hello plain-text world")
+	file := filepath.Join(root, "noext")
+	if err := os.WriteFile(file, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newTestHandler(t, []string{root})
+
+	rec := postJSON(t, h, fmt.Sprintf(`{"path": %q}`, file))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	m := parseMinted(t, rec)
+	if m.sizeBytes != int64(len(content)) {
+		t.Errorf("size_bytes = %d, want %d", m.sizeBytes, len(content))
+	}
+	if m.mimeType != "text/plain; charset=utf-8" {
+		t.Errorf("mime_type = %q, want sniffed text/plain; charset=utf-8", m.mimeType)
 	}
 }
 
