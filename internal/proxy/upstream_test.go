@@ -3,11 +3,14 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -382,5 +385,148 @@ func TestNormalizeObjectSchema(t *testing.T) {
 				t.Errorf("want %v, got %v", tc.want, got)
 			}
 		})
+	}
+}
+
+// TestDownstreamToolDropsBadOutputSchema locks the I-2 fix: a tool whose
+// output schema cannot be normalized is kept (output schema dropped), not
+// skipped entirely.
+func TestDownstreamToolDropsBadOutputSchema(t *testing.T) {
+	dt, err := downstreamTool(&mcp.Tool{
+		Name:         "weird_output",
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "string"}, // not an object schema
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("expected tool to be kept with dropped output schema, got error: %v", err)
+	}
+	if dt.OutputSchema != nil {
+		t.Errorf("expected nil output schema, got %v", dt.OutputSchema)
+	}
+	if dt.Name != "weird_output" {
+		t.Errorf("name mangled: %q", dt.Name)
+	}
+}
+
+// TestConnectListFailureResetsSession locks the M-1 fix: when the initial
+// tool sync fails after the session was established, Connect returns the
+// error AND leaves no stale session behind.
+func TestConnectListFailureResetsSession(t *testing.T) {
+	ctx := context.Background()
+
+	upstreamServer := mcp.NewServer(&mcp.Implementation{Name: "example-mcp", Version: "0.1.0"}, nil)
+	upstreamServer.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				return nil, errors.New("list boom")
+			}
+			return next(ctx, method, req)
+		}
+	})
+	upstreamHTTP := serveMCP(t, upstreamServer)
+
+	up := NewUpstream(upstreamHTTP.URL, &UpstreamOptions{Logger: testLogger()})
+	server := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "0.1.0"}, nil)
+	if err := up.Connect(ctx, server); err == nil {
+		t.Fatal("Connect with failing tools/list: expected error, got nil")
+	}
+
+	up.mu.Lock()
+	session := up.session
+	up.mu.Unlock()
+	if session != nil {
+		t.Error("stale session left behind after failed Connect")
+	}
+	if err := up.SyncTools(ctx, server); err == nil {
+		t.Error("SyncTools after failed Connect: expected not-connected error, got nil")
+	}
+}
+
+// TestForwardNotBlockedDuringSlowSync locks the I-1 fix: while a SyncTools
+// listing is stuck on a hung upstream tools/list, mirrored tool calls must
+// still be forwarded (they only need the session pointer, briefly).
+func TestForwardNotBlockedDuringSlowSync(t *testing.T) {
+	ctx := context.Background()
+
+	blockList := make(chan struct{})   // closed to release the blocked listing
+	enteredList := make(chan struct{}) // closed when the blocked listing starts
+	var gate atomic.Bool
+	var entered sync.Once
+
+	upstreamServer := mcp.NewServer(&mcp.Implementation{Name: "example-mcp", Version: "0.1.0"}, nil)
+	addDownloadFileTool(upstreamServer)
+	upstreamServer.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" && gate.Load() {
+				entered.Do(func() { close(enteredList) })
+				select {
+				case <-blockList:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			return next(ctx, method, req)
+		}
+	})
+	upstreamHTTP := serveMCP(t, upstreamServer)
+
+	downstreamServer := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "0.1.0"}, nil)
+	up := NewUpstream(upstreamHTTP.URL, &UpstreamOptions{Logger: testLogger()})
+	if err := up.Connect(ctx, downstreamServer); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { up.Close() })
+	downstreamHTTP := serveMCP(t, downstreamServer)
+	downstreamSession := connectClient(t, ctx, downstreamHTTP.URL)
+
+	// Start a re-sync whose listing hangs inside the upstream middleware.
+	gate.Store(true)
+	syncDone := make(chan error, 1)
+	go func() { syncDone <- up.SyncTools(context.Background(), downstreamServer) }()
+	select {
+	case <-enteredList:
+	case <-time.After(3 * time.Second):
+		t.Fatal("re-sync never reached the blocked tools/list")
+	}
+
+	// A mirrored tool call must complete while the listing is stuck.
+	type callResult struct {
+		text string
+		err  error
+	}
+	callDone := make(chan callResult, 1)
+	go func() {
+		res, err := downstreamSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "download_file",
+			Arguments: map[string]any{"path": "/x"},
+		})
+		if err != nil {
+			callDone <- callResult{err: err}
+			return
+		}
+		tc, _ := res.Content[0].(*mcp.TextContent)
+		callDone <- callResult{text: tc.Text}
+	}()
+	select {
+	case r := <-callDone:
+		if r.err != nil {
+			t.Fatalf("forwarded call failed during slow listing: %v", r.err)
+		}
+		if r.text != helloFilePath {
+			t.Errorf("expected %q, got %q", helloFilePath, r.text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("forwarded call blocked by in-flight tools/list (mutex held across network)")
+	}
+
+	// Release the listing; the sync must complete successfully.
+	close(blockList)
+	select {
+	case err := <-syncDone:
+		if err != nil {
+			t.Fatalf("SyncTools after unblock: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("SyncTools did not finish after unblock")
 	}
 }
