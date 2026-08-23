@@ -20,6 +20,7 @@ type recordingMintHandler struct {
 	mu       sync.Mutex
 	hits     int
 	lastAuth string
+	lastPath string
 	lastBody map[string]any
 	status   int // 0 → serve respBody with 200
 	respBody string
@@ -34,6 +35,7 @@ func (h *recordingMintHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	defer h.mu.Unlock()
 	h.hits++
 	h.lastAuth = r.Header.Get("Authorization")
+	h.lastPath = r.URL.Path
 	h.lastBody = m
 
 	status := h.status
@@ -50,6 +52,25 @@ func (h *recordingMintHandler) snapshot() (hits int, auth string, body map[strin
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.hits, h.lastAuth, h.lastBody
+}
+
+func TestMintClientNormalizesTrailingSlash(t *testing.T) {
+	mh := &recordingMintHandler{respBody: mintBody(1, "text/plain")}
+	srv := httptest.NewServer(mh)
+	t.Cleanup(srv.Close)
+
+	mc, err := NewMintClient(srv.URL+"/", "test-token", nil)
+	if err != nil {
+		t.Fatalf("NewMintClient: %v", err)
+	}
+	if _, err := mc.Mint(context.Background(), "/tmp/x", "inline", 0); err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	mh.mu.Lock()
+	defer mh.mu.Unlock()
+	if mh.lastPath != "/mint" {
+		t.Errorf("mint path = %q, want /mint (trailing slash not normalized)", mh.lastPath)
+	}
 }
 
 // fakeFileHandler fakes the sidecar file endpoint (signed URL target).

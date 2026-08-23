@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,7 @@ func NewMintClient(mintURL, token string, hc *http.Client) (*MintClient, error) 
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("proxy: invalid mint URL (need http/https with host)")
 	}
+	mintURL = strings.TrimRight(mintURL, "/")
 	if token == "" {
 		return nil, fmt.Errorf("proxy: mint token must not be empty")
 	}
