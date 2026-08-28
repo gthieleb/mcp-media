@@ -1,0 +1,29 @@
+# Dockerfile.example — example-mcp (cmd/example-mcp), Wave 1.
+#
+# Multi-stage build: compile with the Go toolchain image, ship a static
+# binary in a distroless nonroot image (uid 65532, no shell, no package
+# manager). Mirrors Dockerfile.sidecar conventions. Used as the upstream
+# MCP server in E2E/topology diagrams and as a reference integration target.
+
+FROM golang:1.25 AS build
+WORKDIR /workspace
+
+# Layer caching: module download depends only on go.mod/go.sum.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" \
+    -o /example-mcp ./cmd/example-mcp
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /example-mcp /example-mcp
+
+# 7777: streamable HTTP MCP server with a single download_file tool.
+EXPOSE 7777
+
+# Run as the distroless nonroot user explicitly — guards against a base
+# image tag mistake silently reverting to root.
+USER 65532:65532
+
+ENTRYPOINT ["/example-mcp"]

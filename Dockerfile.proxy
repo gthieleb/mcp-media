@@ -1,0 +1,28 @@
+# Dockerfile.proxy — mcp-media-proxy (cmd/mcp-media-proxy), Wave 2.
+#
+# Multi-stage build: compile with the Go toolchain image, ship a static
+# binary in a distroless nonroot image (uid 65532, no shell, no package
+# manager). Mirrors Dockerfile.sidecar conventions.
+
+FROM golang:1.25 AS build
+WORKDIR /workspace
+
+# Layer caching: module download depends only on go.mod/go.sum.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" \
+    -o /mcp-media-proxy ./cmd/mcp-media-proxy
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /mcp-media-proxy /mcp-media-proxy
+
+# 5780: streamable HTTP downstream MCP server (upstream + generic tools).
+EXPOSE 5780
+
+# Run as the distroless nonroot user explicitly — guards against a base
+# image tag mistake silently reverting to root.
+USER 65532:65532
+
+ENTRYPOINT ["/mcp-media-proxy"]
