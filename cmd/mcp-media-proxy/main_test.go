@@ -35,6 +35,7 @@ func TestLoadConfigValid(t *testing.T) {
 
 func TestLoadConfigFull(t *testing.T) {
 	cfg, err := loadConfig(mapEnv(t, map[string]string{
+		"PROXY_MODE":           "full",
 		"UPSTREAM_MCP_URL":     "http://up:7777",
 		"MINT_URL":             "http://mint:8091",
 		"MEDIA_INTERNAL_TOKEN": "tok",
@@ -46,6 +47,9 @@ func TestLoadConfigFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
+	if cfg.Mode != proxy.ModeFull || cfg.AutoDetected {
+		t.Errorf("mode = %q (auto=%v), want explicit full", cfg.Mode, cfg.AutoDetected)
+	}
 	if cfg.ToolMatch != "^save_" || cfg.ListenAddr != ":9999" || cfg.InlineMaxBytes != 2048 {
 		t.Errorf("overrides not applied: %+v", cfg)
 	}
@@ -56,6 +60,7 @@ func TestLoadConfigFull(t *testing.T) {
 
 func TestLoadConfigErrors(t *testing.T) {
 	valid := map[string]string{
+		"PROXY_MODE":           "full",
 		"UPSTREAM_MCP_URL":     "http://up:7777",
 		"MINT_URL":             "http://mint:8091",
 		"MEDIA_INTERNAL_TOKEN": "tok",
@@ -114,6 +119,132 @@ func TestLoadConfigErrors(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadConfigStandaloneMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantMode proxy.Mode
+		wantErr  string
+	}{
+		{
+			name: "no mode with upstream implies full",
+			env: map[string]string{
+				"UPSTREAM_MCP_URL":     "http://up:7777",
+				"MINT_URL":             "http://mint:8091",
+				"MEDIA_INTERNAL_TOKEN": "tok",
+			},
+			wantMode: proxy.ModeFull,
+		},
+		{
+			name: "no mode without upstream auto-detects standalone",
+			env: map[string]string{
+				"MINT_URL":             "http://mint:8091",
+				"MEDIA_INTERNAL_TOKEN": "tok",
+			},
+			wantMode: proxy.ModeStandalone,
+		},
+		{
+			name: "explicit full",
+			env: map[string]string{
+				"PROXY_MODE":           "full",
+				"UPSTREAM_MCP_URL":     "http://up:7777",
+				"MINT_URL":             "http://mint:8091",
+				"MEDIA_INTERNAL_TOKEN": "tok",
+			},
+			wantMode: proxy.ModeFull,
+		},
+		{
+			name: "explicit standalone without upstream",
+			env: map[string]string{
+				"PROXY_MODE":           "standalone",
+				"MINT_URL":             "http://mint:8091",
+				"MEDIA_INTERNAL_TOKEN": "tok",
+			},
+			wantMode: proxy.ModeStandalone,
+		},
+		{
+			name: "invalid mode value",
+			env: map[string]string{
+				"PROXY_MODE":           "solo",
+				"MINT_URL":             "http://mint:8091",
+				"MEDIA_INTERNAL_TOKEN": "tok",
+			},
+			wantErr: "PROXY_MODE",
+		},
+		{
+			name: "explicit full without upstream",
+			env: map[string]string{
+				"PROXY_MODE":           "full",
+				"MINT_URL":             "http://mint:8091",
+				"MEDIA_INTERNAL_TOKEN": "tok",
+			},
+			wantErr: "UPSTREAM_MCP_URL",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfig(mapEnv(t, tc.env))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if cfg.Mode != tc.wantMode {
+				t.Errorf("Mode = %q, want %q", cfg.Mode, tc.wantMode)
+			}
+			if tc.wantMode == proxy.ModeStandalone && cfg.UpstreamURL != "" {
+				t.Errorf("standalone must not set UpstreamURL, got %q", cfg.UpstreamURL)
+			}
+			if tc.wantMode == proxy.ModeStandalone && cfg.ToolMatch != "" {
+				t.Errorf("standalone must not set ToolMatch, got %q", cfg.ToolMatch)
+			}
+		})
+	}
+}
+
+// TestLoadConfigStandaloneRejectsUpstreamEnv guards the mode contract: a
+// leftover UPSTREAM_MCP_URL must not silently switch the standalone proxy
+// back into mirroring.
+func TestLoadConfigStandaloneRejectsUpstreamEnv(t *testing.T) {
+	_, err := loadConfig(mapEnv(t, map[string]string{
+		"PROXY_MODE":           "standalone",
+		"UPSTREAM_MCP_URL":     "http://up:7777",
+		"MINT_URL":             "http://mint:8091",
+		"MEDIA_INTERNAL_TOKEN": "tok",
+	}))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "UPSTREAM_MCP_URL") {
+		t.Errorf("error %q does not name UPSTREAM_MCP_URL", err)
+	}
+}
+
+// TestLoadConfigAutoDetectStandalone asserts the documented fallback: full
+// mode (the default) without UPSTREAM_MCP_URL auto-detects standalone.
+func TestLoadConfigAutoDetectStandalone(t *testing.T) {
+	cfg, err := loadConfig(mapEnv(t, map[string]string{
+		"MINT_URL":             "http://mint:8091",
+		"MEDIA_INTERNAL_TOKEN": "tok",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Mode != proxy.ModeStandalone {
+		t.Errorf("Mode = %q, want standalone auto-detect", cfg.Mode)
+	}
+	if !cfg.AutoDetected {
+		t.Error("AutoDetected = false, want true")
 	}
 }
 

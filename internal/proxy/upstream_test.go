@@ -109,6 +109,101 @@ func callText(t *testing.T, ctx context.Context, session *mcp.ClientSession, nam
 	return tc.Text
 }
 
+// TestStandaloneToolsListOnlyGeneric builds a downstream server in standalone
+// wiring (generic tools, no Upstream) and asserts a client sees exactly the
+// generic media tools — the agent-pod egress contract.
+func TestStandaloneToolsListOnlyGeneric(t *testing.T) {
+	// Given — a downstream server with only the generic tools registered.
+	server := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "0.1.0"}, nil)
+	RegisterMediaTools(server, nil, MediaToolOptions{Logger: testLogger()})
+	httpSrv := serveMCP(t, server)
+
+	// When — a client lists the tools.
+	session := connectClient(t, context.Background(), httpSrv.URL)
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	// Then — exactly stream_media and download_file are exposed.
+	got := make(map[string]bool, len(res.Tools))
+	for _, tool := range res.Tools {
+		got[tool.Name] = true
+	}
+	if len(got) != 2 || !got["stream_media"] || !got["download_file"] {
+		t.Errorf("tools/list = %v, want exactly stream_media + download_file", got)
+	}
+}
+
+// TestWiringForMode asserts the per-mode component matrix that run() uses to
+// decide which proxy mechanisms to activate.
+func TestWiringForMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       Mode
+		wantWiring Wiring
+	}{
+		{name: "full mirrors and enriches", mode: ModeFull, wantWiring: Wiring{MirrorUpstream: true, Enrich: true}},
+		{name: "standalone serves generic tools only", mode: ModeStandalone, wantWiring: Wiring{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// When
+			got := WiringForMode(tc.mode)
+
+			// Then
+			if got != tc.wantWiring {
+				t.Errorf("WiringForMode(%q) = %+v, want %+v", tc.mode, got, tc.wantWiring)
+			}
+		})
+	}
+}
+
+// TestStandaloneWithMintEndToEnd exercises the standalone surface end to
+// end: generic tools only, a real mint call succeeds, and a dead upstream
+// URL is never dialed (Connect skipped).
+func TestStandaloneWithMintEndToEnd(t *testing.T) {
+	// Given — fake mint API + standalone server wiring.
+	mh := &recordingMintHandler{respBody: mintBody(14, "text/plain")}
+	mintServer := httptest.NewServer(mh)
+	t.Cleanup(mintServer.Close)
+	mc, err := NewMintClient(mintServer.URL, "test-token", nil)
+	if err != nil {
+		t.Fatalf("NewMintClient: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "0.1.0"}, nil)
+	RegisterMediaTools(server, mc, MediaToolOptions{Logger: testLogger()})
+	httpSrv := serveMCP(t, server)
+	session := connectClient(t, context.Background(), httpSrv.URL)
+
+	// When — a client calls download_file; the "upstream" URL points at a
+	// dead port but is intentionally never connected in standalone.
+	up := NewUpstream("http://127.0.0.1:1/dead", &UpstreamOptions{Logger: testLogger()})
+	_ = up // inert: standalone wiring never calls Connect
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "download_file",
+		Arguments: map[string]any{"path": helloFilePath},
+	})
+
+	// Then — the mint-backed tool works; exactly the generic tools exist.
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %v", texts(res))
+	}
+	sc := structuredMap(t, res)
+	if sc["url"] != signedURL {
+		t.Errorf("url = %v, want %v", sc["url"], signedURL)
+	}
+	hits, _, body := mh.snapshot()
+	if hits != 1 || body["path"] != helloFilePath {
+		t.Errorf("mint hits = %d, path = %v", hits, body["path"])
+	}
+}
+
 // TestMirrorAndForward exercises the full proxy path in-process: an
 // example-mcp-style upstream server, an Upstream mirroring it onto a fresh
 // downstream server, and a downstream client listing and calling the

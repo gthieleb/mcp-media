@@ -8,18 +8,27 @@
 //   - optionally enriches matching tool responses with signed URLs
 //     (TOOL_MATCH).
 //
+// In standalone mode (PROXY_MODE=standalone, Wave 6) it serves ONLY the
+// generic media tools — no upstream mirroring, no enrichment. This is the
+// egress surface for agent pods.
+//
 // Configuration is entirely env-driven and the process refuses to start on
 // invalid config (fail fast). Secrets are validated but never logged — only
 // their lengths.
 //
 // Environment:
 //
+//	PROXY_MODE           "full" (default) mirrors the upstream MCP server
+//	                     with enrichment; "standalone" serves only the
+//	                     generic media tools. Omitting both PROXY_MODE and
+//	                     UPSTREAM_MCP_URL auto-detects standalone.
 //	UPSTREAM_MCP_URL     streamable HTTP endpoint of the upstream MCP server
-//	                     (required, http(s) with host)
+//	                     (required in full mode, http(s) with host; must be
+//	                     unset in standalone mode)
 //	MINT_URL             base URL of the sidecar mint API (required, http(s))
 //	MEDIA_INTERNAL_TOKEN bearer token for POST /mint (required, non-empty)
 //	TOOL_MATCH           regex selecting tool names for response enrichment;
-//	                     empty disables enrichment (optional)
+//	                     empty disables enrichment (optional, full mode only)
 //	PROXY_LISTEN_ADDR    downstream listen address (default ":5780")
 //	INLINE_MAX_BYTES     inline payload cap for stream_media
 //	                     (default 102400)
@@ -65,40 +74,79 @@ const (
 
 // config is the validated startup configuration of the proxy.
 type config struct {
-	UpstreamURL    string
+	Mode           proxy.Mode
+	UpstreamURL    string // "" → no upstream (standalone)
 	MintURL        string
 	Token          string
 	ToolMatch      string // "" → enrichment disabled
 	ListenAddr     string
 	InlineMaxBytes int64
 	FetchBaseURL   string // "" → fetch minted URLs as-is
+	// AutoDetected reports that standalone mode was chosen by absence of
+	// UPSTREAM_MCP_URL rather than an explicit PROXY_MODE.
+	AutoDetected bool
 }
 
 // loadConfig reads and validates the proxy configuration. getenv is the
 // environment lookup (os.Getenv in production, a stub in tests). Any
 // invalid value is a fatal startup error.
 func loadConfig(getenv func(string) string) (config, error) {
-	var cfg config
+	modeEnv := getenv("PROXY_MODE")
+	upstreamEnv := getenv("UPSTREAM_MCP_URL")
 
-	var err error
-	cfg.UpstreamURL, err = httpURLEnv(getenv, "UPSTREAM_MCP_URL", true)
+	cfg := config{Mode: proxy.ModeFull}
+	switch modeEnv {
+	case "":
+		if upstreamEnv == "" {
+			// Auto-detect: full mode needs an upstream to mirror; with no
+			// upstream configured the proxy must serve the generic tools
+			// instead (agent-pod standalone wiring).
+			cfg.Mode = proxy.ModeStandalone
+			cfg.AutoDetected = true
+		}
+	case string(proxy.ModeFull), string(proxy.ModeStandalone):
+		cfg.Mode = proxy.Mode(modeEnv)
+	default:
+		return config{}, fmt.Errorf(
+			"PROXY_MODE %q is invalid: must be %q or %q", modeEnv, proxy.ModeFull, proxy.ModeStandalone)
+	}
+
+	if cfg.Mode == proxy.ModeStandalone {
+		// A leftover UPSTREAM_MCP_URL must not silently re-enable
+		// mirroring; TOOL_MATCH has nothing to enrich in standalone.
+		if upstreamEnv != "" {
+			return config{}, errors.New(
+				"UPSTREAM_MCP_URL must be unset in standalone mode (remove it or switch PROXY_MODE to full)")
+		}
+		if getenv("TOOL_MATCH") != "" {
+			return config{}, errors.New(
+				"TOOL_MATCH must be unset in standalone mode (there are no mirrored tools to enrich)")
+		}
+	} else {
+		var err error
+		cfg.UpstreamURL, err = httpURLEnv(getenv, "UPSTREAM_MCP_URL", true)
+		if err != nil {
+			return config{}, err
+		}
+	}
+
+	mintURL, err := httpURLEnv(getenv, "MINT_URL", true)
 	if err != nil {
 		return config{}, err
 	}
-	cfg.MintURL, err = httpURLEnv(getenv, "MINT_URL", true)
-	if err != nil {
-		return config{}, err
-	}
+	cfg.MintURL = mintURL
 
 	cfg.Token = getenv("MEDIA_INTERNAL_TOKEN")
 	if cfg.Token == "" {
 		return config{}, errors.New("MEDIA_INTERNAL_TOKEN is required")
 	}
 
-	cfg.ToolMatch = getenv("TOOL_MATCH")
-	if cfg.ToolMatch != "" {
-		if _, err := regexp.Compile(cfg.ToolMatch); err != nil {
-			return config{}, fmt.Errorf("TOOL_MATCH %q is not a valid regex", cfg.ToolMatch)
+	if cfg.Mode == proxy.ModeFull {
+		cfg.ToolMatch = getenv("TOOL_MATCH")
+		if cfg.ToolMatch != "" {
+			if _, err := regexp.Compile(cfg.ToolMatch); err != nil {
+				return config{}, fmt.Errorf("TOOL_MATCH %q is not a valid regex", cfg.ToolMatch)
+			}
 		}
 	}
 
@@ -155,6 +203,8 @@ func httpURLEnv(getenv func(string) string, key string, required bool) (string, 
 // logged — only its length.
 func (c config) logValue() slog.Value {
 	return slog.GroupValue(
+		slog.String("mode", string(c.Mode)),
+		slog.Bool("mode_auto_detected", c.AutoDetected),
 		slog.String("upstream_url", c.UpstreamURL),
 		slog.String("mint_url", c.MintURL),
 		slog.String("tool_match", c.ToolMatch),
@@ -166,9 +216,9 @@ func (c config) logValue() slog.Value {
 }
 
 // run builds the downstream MCP server (generic tools + optional enrichment
-// middleware), connects the upstream session, serves it via streamable HTTP
-// and blocks until ctx is cancelled or serving fails. Both the listener and
-// the upstream session are shut down gracefully.
+// middleware), connects the upstream session in full mode, serves via
+// streamable HTTP and blocks until ctx is cancelled or serving fails. Both
+// the listener and the upstream session are shut down gracefully.
 func run(ctx context.Context, cfg config) error {
 	logger := slog.Default()
 
@@ -185,7 +235,8 @@ func run(ctx context.Context, cfg config) error {
 		Logger:         logger,
 	})
 
-	if cfg.ToolMatch != "" {
+	wiring := proxy.WiringForMode(cfg.Mode)
+	if wiring.Enrich && cfg.ToolMatch != "" {
 		enricher, err := proxy.NewEnricher(mc, cfg.ToolMatch, logger)
 		if err != nil {
 			return fmt.Errorf("enricher: %w", err)
@@ -193,14 +244,16 @@ func run(ctx context.Context, cfg config) error {
 		server.AddReceivingMiddleware(enricher.Middleware())
 	}
 
-	up := proxy.NewUpstream(cfg.UpstreamURL, &proxy.UpstreamOptions{
-		Logger:        logger,
-		ReservedTools: []string{genericStreamMedia, genericDownload},
-	})
-	if err := up.Connect(ctx, server); err != nil {
-		return fmt.Errorf("upstream: %w", err)
+	if wiring.MirrorUpstream {
+		up := proxy.NewUpstream(cfg.UpstreamURL, &proxy.UpstreamOptions{
+			Logger:        logger,
+			ReservedTools: []string{genericStreamMedia, genericDownload},
+		})
+		if err := up.Connect(ctx, server); err != nil {
+			return fmt.Errorf("upstream: %w", err)
+		}
+		defer func() { _ = up.Close() }()
 	}
-	defer func() { _ = up.Close() }()
 
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
