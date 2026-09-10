@@ -25,3 +25,8 @@ docker-compose.override.yml
 *.swp
 # Local build artifacts (Docker-built binaries)
 .bin/
+
+# kubebuilder local tool installs
+bin/
+Dockerfile.cross
+*.kubeconfig

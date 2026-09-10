@@ -31,6 +31,8 @@ scripts/
 coverage.out
 cover.out
 dist/
+bin/
+.bin/
 docker-compose.override.yml
 
 # Docker build files themselves

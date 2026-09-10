@@ -186,7 +186,6 @@ func TestStandaloneWithMintEndToEnd(t *testing.T) {
 		Name:      "download_file",
 		Arguments: map[string]any{"path": helloFilePath},
 	})
-
 	// Then — the mint-backed tool works; exactly the generic tools exist.
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)

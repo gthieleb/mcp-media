@@ -25,18 +25,19 @@ jobs:
   #   sidecar-v*  → ghcr.io/gthieleb/mcp-media-sidecar:<git-tag>
   #   proxy-v*    → ghcr.io/gthieleb/mcp-media-proxy:<git-tag>
   #   example-v* → ghcr.io/gthieleb/mcp-media-example:<git-tag>
+  #   controller-v* → ghcr.io/gthieleb/mcp-media-controller:<git-tag>
   # The image tag is the full git tag (e.g. "proxy-v0.1.0") for 1:1 traceability.
   images:
     needs: unit
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/sidecar-v') || startsWith(github.ref, 'refs/tags/proxy-v') || startsWith(github.ref, 'refs/tags/example-v')
+    if: startsWith(github.ref, 'refs/tags/sidecar-v') || startsWith(github.ref, 'refs/tags/proxy-v') || startsWith(github.ref, 'refs/tags/example-v') || startsWith(github.ref, 'refs/tags/controller-v')
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        image: [sidecar, proxy, example]
+        image: [sidecar, proxy, example, controller]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
