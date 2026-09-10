@@ -191,12 +191,40 @@ func TestResolveNoRoots(t *testing.T) {
 	}
 }
 
-func TestResolveRelativePath(t *testing.T) {
+func TestResolveRelativeWithoutRoots(t *testing.T) {
+	// Relative input needs a root to join against; without any root there
+	// is no relative base and the input is rejected as an escape error,
+	// independent of the current working directory.
+	if _, err := Resolve(nil, "hello.txt"); !errors.Is(err, ErrEscape) {
+		t.Errorf("Resolve(nil, relative): expected ErrEscape, got %v", err)
+	}
+}
+
+// TestResolveRelativeAgainstMultipleRoots asserts deterministic root
+// selection: with several roots, a relative path resolves against the FIRST
+// root (documented order) and is then fenced with the standard absolute
+// logic — a file living only under a later root yields os.ErrNotExist
+// (404), not ErrEscape.
+func TestResolveRelativeAgainstMultipleRoots(t *testing.T) {
 	tr := newTree(t)
-	// Documented contract: p must be absolute. Relative paths are rejected
-	// as escape errors regardless of the current working directory.
-	if _, err := Resolve([]string{tr.rootA}, "hello.txt"); !errors.Is(err, ErrEscape) {
-		t.Errorf("Resolve(relative): expected ErrEscape, got %v", err)
+	_, err := Resolve([]string{tr.rootA, tr.rootB}, "second.txt")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Resolve(relative, multi-root): expected os.ErrNotExist (resolved against first root only), got %v", err)
+	}
+}
+
+// TestResolveRelativeTraversalEscape asserts the security boundary carries
+// over: a relative path that climbs out of the root via .. is still
+// ErrEscape after joining.
+func TestResolveRelativeTraversalEscape(t *testing.T) {
+	tr := newTree(t)
+	for _, rel := range []string{
+		"../outside/secret.txt",
+		"sub/../../outside/secret.txt",
+	} {
+		if _, err := Resolve([]string{tr.rootA}, rel); !errors.Is(err, ErrEscape) {
+			t.Errorf("Resolve(%q): expected ErrEscape, got %v", rel, err)
+		}
 	}
 }
 
@@ -213,5 +241,23 @@ func TestResolveNotExist(t *testing.T) {
 	}
 	if errors.Is(err, ErrEscape) {
 		t.Errorf("Resolve(%q): must not be ErrEscape, got %v", p, err)
+	}
+}
+
+// TestResolveRelativeAgainstSingleRoot asserts the Wave-6 agent-pod
+// contract: a relative path is resolved against the single configured root
+// (the agent's output volume), so the agent never needs to know pod-internal
+// mount paths.
+func TestResolveRelativeAgainstSingleRoot(t *testing.T) {
+	tr := newTree(t)
+	for _, rel := range []string{"hello.txt", "sub/deep.txt", "./hello.txt"} {
+		got, err := Resolve([]string{tr.rootA}, rel)
+		if err != nil {
+			t.Fatalf("Resolve(%q) returned error: %v", rel, err)
+		}
+		want := resolvedEval(t, filepath.Join(tr.rootA, filepath.Clean(rel)))
+		if got != want {
+			t.Errorf("Resolve(%q) = %q, want %q", rel, got, want)
+		}
 	}
 }

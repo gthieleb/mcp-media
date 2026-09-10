@@ -139,6 +139,35 @@ func assertExpWithin(t *testing.T, exp int64, before, after time.Time, ttl time.
 	}
 }
 
+// TestMintRelativePathAgainstSingleRoot asserts the Wave-6 agent-pod
+// contract end to end at the mint API: a relative path resolves against the
+// first root and produces a valid signature for the canonical resolved path.
+func TestMintRelativePathAgainstSingleRoot(t *testing.T) {
+	root, file := newRoot(t)
+	h := newTestHandler(t, []string{root})
+
+	rec := postJSON(t, h, `{"path": "foo.ogg"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+
+	m := parseMinted(t, rec)
+	decoded, err := base64.RawURLEncoding.DecodeString(m.pathB64)
+	if err != nil {
+		t.Fatalf("decode pathB64: %v", err)
+	}
+	wantPath, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if string(decoded) != wantPath {
+		t.Errorf("signed path = %q, want %q", decoded, wantPath)
+	}
+	if err := sign.Verify(testSecret, m.pathB64, m.exp, m.disposition, m.sig, time.Now()); err != nil {
+		t.Errorf("sign.Verify(minted url): %v", err)
+	}
+}
+
 func TestMintHappyPath(t *testing.T) {
 	root, file := newRoot(t)
 	h := newTestHandler(t, []string{root})
@@ -409,7 +438,9 @@ func TestMintPathErrors(t *testing.T) {
 	}{
 		{"absolute path outside roots", outside, http.StatusForbidden},
 		{"dot-dot traversal", filepath.Join(root, "..", filepath.Base(outsideDir), "secret.txt"), http.StatusForbidden},
-		{"relative path", "relative/file.ogg", http.StatusForbidden},
+		// Wave-6 contract change: relative paths resolve against the first
+		// root; "relative/file.ogg" does not exist there → 404 (not 403).
+		{"relative path missing under root", "relative/file.ogg", http.StatusNotFound},
 		{"missing file inside root", filepath.Join(root, "missing.ogg"), http.StatusNotFound},
 	}
 	for _, tc := range tests {

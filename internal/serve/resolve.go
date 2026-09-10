@@ -23,8 +23,12 @@ var ErrEscape = errors.New("path escapes all configured roots")
 //   - roots are absolute directories. Each root is symlink-resolved
 //     (filepath.EvalSymlinks) per call, so a root reached through a symlink
 //     works. Roots that cannot be resolved are skipped (fail closed).
-//   - p MUST be an absolute path. Relative input is rejected with ErrEscape;
-//     there is no implicit joining against roots or the working directory.
+//   - p may be absolute or relative. Relative input is resolved against the
+//     FIRST root (Wave 6 agent-pod convention: the agent names files
+//     relative to its output volume and never needs pod-internal mount
+//     paths). With multiple roots only the first is the relative base; a
+//     relative path that then escapes it is ErrEscape. An absolute path
+//     must sit under one of the roots as before.
 //   - p is first cleaned lexically (filepath.Clean). If the cleaned path is
 //     not under any root, ErrEscape is returned without touching the disk.
 //   - The candidate is then resolved with filepath.EvalSymlinks, and the
@@ -43,7 +47,12 @@ var ErrEscape = errors.New("path escapes all configured roots")
 func Resolve(roots []string, p string) (string, error) {
 	clean := filepath.Clean(p)
 	if !filepath.IsAbs(clean) {
-		return "", fmt.Errorf("%w: %q is not an absolute path", ErrEscape, p)
+		// Relative path: join against the first root and re-fence with the
+		// standard absolute logic (Clean already applied to the join).
+		if len(roots) == 0 {
+			return "", fmt.Errorf("%w: %q is not an absolute path and no roots are configured", ErrEscape, p)
+		}
+		return Resolve([]string{roots[0]}, filepath.Join(filepath.Clean(roots[0]), clean))
 	}
 
 	// Cheap lexical pre-check: avoids touching the disk for obvious escapes.
