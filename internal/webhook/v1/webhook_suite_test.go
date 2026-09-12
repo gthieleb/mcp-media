@@ -14,6 +14,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -77,6 +79,27 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// Label the default namespace for media injection: the webhook only
+	// mutates pods in namespaces carrying media-injection=enabled.
+	By("enabling media injection on the default namespace")
+	for nsName, enabled := range map[string]bool{"default": true, "media-disabled": false} {
+		var ns corev1.Namespace
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: nsName}, &ns); err != nil {
+			if !apierrors.IsNotFound(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+			ns = corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+			Expect(k8sClient.Create(ctx, &ns)).NotTo(HaveOccurred())
+		}
+		if ns.Labels == nil {
+			ns.Labels = map[string]string{}
+		}
+		if enabled {
+			ns.Labels["media-injection"] = "enabled"
+		}
+		Expect(k8sClient.Update(ctx, &ns)).NotTo(HaveOccurred())
+	}
 
 	// start webhook server using Manager.
 	webhookInstallOptions := &testEnv.WebhookInstallOptions
