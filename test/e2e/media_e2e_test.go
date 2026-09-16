@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
@@ -175,6 +176,14 @@ var _ = Describe("media-controller E2E", Ordered, func() {
 				"15780:5780", "-n", e2eNamespace)
 			Expect(pfCmd.Start()).To(Succeed())
 			DeferCleanup(func() { _ = pfCmd.Process.Kill() })
+			Eventually(func() error {
+				out, err := kube("get", "pods", "-n", e2eNamespace, "-l", "app=media-full-e2e",
+					"-o", "jsonpath={.items[0].status.phase}")
+				if err != nil || out != "Running" {
+					return fmt.Errorf("pod not ready: %s (%v)", out, err)
+				}
+				return nil
+			}).Should(Succeed())
 
 			By("running the probe against the forwarded proxy")
 			var out string
@@ -182,10 +191,8 @@ var _ = Describe("media-controller E2E", Ordered, func() {
 				out, _ = runProbe("--url", "http://localhost:15780/mcp",
 					"-tool", "save_file", "-path", "/data/hello.txt")
 				return out
-			}, 2*time.Minute, 2*time.Second).Should(ContainSubstring("http://"),
-				"probe output missing minted URL: %s", out)
-			By("asserting the enrichment text carries the minted URL")
-			Expect(out).To(ContainSubstring("text: http://"))
+			}, 2*time.Minute, 2*time.Second).Should(ContainSubstring("text: http://"),
+				"probe output missing enriched URL: %s", out)
 		})
 	})
 
