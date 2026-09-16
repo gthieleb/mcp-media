@@ -3,7 +3,8 @@
 *.out
 coverage.out
 cover.out
-dist/
+dist/*
+!dist/chart/
 
 # Local config / secrets
 .env

@@ -19,6 +19,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	controller "github.com/gthieleb/mcp-media/internal/controller"
 	webhookv1 "github.com/gthieleb/mcp-media/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -162,10 +163,25 @@ func main() {
 
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		// T3.4 values: injected container images + secret names (set via
+		// controller Deployment env / Helm values).
+		webhookv1.ConfigureImages(
+			os.Getenv("SIDECAR_IMAGE"),
+			os.Getenv("PROXY_IMAGE"),
+			os.Getenv("SIGNING_SECRET_NAME"),
+			os.Getenv("INTERNAL_TOKEN_SECRET_NAME"),
+		)
 		if err := webhookv1.SetupPodWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create webhook", "webhook", "Pod")
 			os.Exit(1)
 		}
+	}
+	if err := (&controller.WorkloadReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up WorkloadReconciler")
+		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
 
