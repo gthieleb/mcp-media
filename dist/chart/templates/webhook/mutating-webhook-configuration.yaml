@@ -17,6 +17,9 @@ webhooks:
       path: /mutate--v1-pod
   failurePolicy: Ignore
   name: mpod-v1.kb.io
+  namespaceSelector:
+    matchLabels:
+      media-injection: enabled
   rules:
   - apiGroups:
     - ""

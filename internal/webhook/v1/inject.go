@@ -39,6 +39,22 @@ func addSidecar(pod *corev1.Pod, req injectionRequest) {
 		path = defaultVolumePath
 	}
 
+	env := []corev1.EnvVar{
+		{Name: "MEDIA_INTERNAL_TOKEN", ValueFrom: secretKeyRef(internalTokenSecret)},
+		{Name: "MEDIA_SIGNING_SECRET", ValueFrom: secretKeyRef(signingSecretName)},
+		{Name: "MEDIA_ROOTS", Value: path},
+	}
+	// The sidecar refuses to start without MEDIA_PUBLIC_BASE_URL; default to
+	// the in-cluster media Service (the Reconciler guarantees
+	// <workload>-media exists) — external URLs come from the public-url
+	// annotation or the Reconciler's inherited host override.
+	publicURL := req.PublicURL
+	if publicURL == "" {
+		publicURL = fmt.Sprintf("http://%s-media.%s.svc:%d",
+			injectTargetName(pod), pod.Namespace, sidecarServePort)
+	}
+	env = append([]corev1.EnvVar{{Name: "MEDIA_PUBLIC_BASE_URL", Value: publicURL}}, env...)
+
 	sc := corev1.Container{
 		Name:  sidecarName,
 		Image: sidecarImage,
@@ -46,12 +62,7 @@ func addSidecar(pod *corev1.Pod, req injectionRequest) {
 			{Name: "serve", ContainerPort: sidecarServePort},
 			{Name: "mint", ContainerPort: sidecarMintPort},
 		},
-		Env: []corev1.EnvVar{
-			{Name: "MEDIA_PUBLIC_BASE_URL", Value: req.PublicURL},
-			{Name: "MEDIA_INTERNAL_TOKEN", ValueFrom: secretKeyRef(internalTokenSecret)},
-			{Name: "MEDIA_SIGNING_SECRET", ValueFrom: secretKeyRef(signingSecretName)},
-			{Name: "MEDIA_ROOTS", Value: path},
-		},
+		Env: env,
 		VolumeMounts: []corev1.VolumeMount{{
 			Name:      mediaVolumeName,
 			MountPath: path,
@@ -60,6 +71,7 @@ func addSidecar(pod *corev1.Pod, req injectionRequest) {
 	}
 	pod.Spec.Containers = append(pod.Spec.Containers, sc)
 	addMediaVolume(pod, req)
+	mountMainContainer(pod, req, path)
 }
 
 // addProxy appends the mcp-media-proxy container with its env contract.
@@ -146,6 +158,26 @@ func addMediaVolume(pod *corev1.Pod, req injectionRequest) {
 	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
 }
 
+// mountMainContainer gives the first main container a read-write mount of
+// the media volume at its media root (per plan: the workload writes the
+// volume, the sidecar consumes it read-only). Idempotent.
+func mountMainContainer(pod *corev1.Pod, req injectionRequest, path string) {
+	if len(pod.Spec.Containers) == 0 {
+		return
+	}
+	main := &pod.Spec.Containers[0]
+	for _, m := range main.VolumeMounts {
+		if m.Name == mediaVolumeName {
+			return
+		}
+	}
+	main.VolumeMounts = append(main.VolumeMounts, corev1.VolumeMount{
+		Name:      mediaVolumeName,
+		MountPath: path,
+		ReadOnly:  false,
+	})
+}
+
 // hasContainer reports whether the pod already carries a container name.
 func hasContainer(pod *corev1.Pod, name string) bool {
 	for _, c := range pod.Spec.Containers {
@@ -154,6 +186,17 @@ func hasContainer(pod *corev1.Pod, name string) bool {
 		}
 	}
 	return false
+}
+
+// injectTargetName derives the workload name from pod labels
+// (app.kubernetes.io/instance, then app.kubernetes.io/name, then pod name).
+func injectTargetName(pod *corev1.Pod) string {
+	for _, key := range []string{"app.kubernetes.io/instance", "app.kubernetes.io/name", "app"} {
+		if v := pod.Labels[key]; v != "" {
+			return v
+		}
+	}
+	return pod.Name
 }
 
 // secretKeyRef builds a whole-secret env source (single-key secret layout:

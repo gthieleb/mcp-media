@@ -92,25 +92,6 @@ spec:
         {{- end }}
         command:
         - /manager
-        {{- if or .Values.manager.env .Values.manager.extraEnv .Values.media }}
-        env:
-        {{- with .Values.manager.env }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- with .Values.manager.extraEnv }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- if .Values.media }}
-        - name: SIDECAR_IMAGE
-          value: {{ .Values.media.sidecarImage | quote }}
-        - name: PROXY_IMAGE
-          value: {{ .Values.media.proxyImage | quote }}
-        - name: SIGNING_SECRET_NAME
-          value: {{ .Values.media.signingSecretName | quote }}
-        - name: INTERNAL_TOKEN_SECRET_NAME
-          value: {{ .Values.media.internalTokenSecretName | quote }}
-        {{- end }}
-        {{- end }}
         image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default .Chart.AppVersion }}{{- end }}"
         {{- with .Values.manager.image.pullPolicy }}
         imagePullPolicy: {{ . }}

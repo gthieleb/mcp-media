@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,6 +96,71 @@ func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, w workloads
 		return err
 	}
 	log.V(1).Info("media ingress ensured", "ingress", name, "class", deref(ing.Spec.IngressClassName))
+	if err := r.ensureSidecarPublicURL(ctx, w, ing); err != nil {
+		log.Info("sidecar public URL patch deferred, requeueing", "err", err)
+	}
+	return nil
+}
+
+// ensureSidecarPublicURL patches the injected sidecar's
+// MEDIA_PUBLIC_BASE_URL with the external media host (https, tailscale
+// auto-TLS) when the workload template carries no public-url annotation.
+// The pod template is updated so the next rollout picks it up.
+func (r *WorkloadReconciler) ensureSidecarPublicURL(ctx context.Context, w workloads, ing *networkingv1.Ingress) error {
+	log := logf.FromContext(ctx)
+	ann := w.GetPodTemplateAnnotations()
+	if ann[annPublicURL] != "" {
+		return nil // explicit annotation wins
+	}
+	if len(ing.Spec.Rules) == 0 || ing.Spec.Rules[0].Host == "" {
+		return nil
+	}
+	host := ing.Spec.Rules[0].Host
+	external := "https://" + host
+
+	// Fetch the live workload, patch the sidecar env + pod template annotation
+	// with the derived value so the webhook keeps it stable on next pod
+	// create.
+	var dep appsv1.Deployment
+	err := r.Get(ctx, types.NamespacedName{Namespace: w.GetNamespace(), Name: w.GetName()}, &dep)
+	if err != nil {
+		return err
+	}
+	for i := range dep.Spec.Template.Spec.Containers {
+		c := &dep.Spec.Template.Spec.Containers[i]
+		if c.Name != sidecarName {
+			continue
+		}
+		for j := range c.Env {
+			if c.Env[j].Name == "MEDIA_PUBLIC_BASE_URL" && c.Env[j].Value == external {
+				return nil // already correct
+			}
+		}
+	}
+	patched := dep.DeepCopy()
+	if patched.Annotations == nil {
+		patched.Annotations = map[string]string{}
+	}
+	for i := range patched.Spec.Template.Spec.Containers {
+		c := &patched.Spec.Template.Spec.Containers[i]
+		if c.Name != sidecarName {
+			continue
+		}
+		replaced := false
+		for j := range c.Env {
+			if c.Env[j].Name == "MEDIA_PUBLIC_BASE_URL" {
+				c.Env[j].Value = external
+				replaced = true
+			}
+		}
+		if !replaced {
+			c.Env = append(c.Env, corev1.EnvVar{Name: "MEDIA_PUBLIC_BASE_URL", Value: external})
+		}
+	}
+	if err := r.Patch(ctx, patched, client.MergeFrom(&dep)); err != nil {
+		return err
+	}
+	log.Info("sidecar MEDIA_PUBLIC_BASE_URL set from inherited ingress host", "host", external)
 	return nil
 }
 
@@ -159,8 +225,13 @@ func tlsSecretOf(src *networkingv1.Ingress) string {
 	return src.Spec.TLS[0].SecretName
 }
 
+// sidecarName is the injected sidecar container name (shared with the
+// webhook package contract).
+const sidecarName = "media-sidecar"
+
 // Ingress-shaping annotation keys (subset of the webhook contract).
 const (
+	annPublicURL        = "media.media/public-url"
 	annIngressClass     = "media.media/ingress-class"
 	annIngressHost      = "media.media/ingress-host"
 	annCertIssuer       = "media.media/cert-issuer"

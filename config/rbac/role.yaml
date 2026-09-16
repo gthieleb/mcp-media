@@ -7,6 +7,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - services
   verbs:
   - create
@@ -19,6 +27,7 @@ rules:
   - apps
   resources:
   - deployments
+  - statefulsets
   verbs:
   - get
   - list

@@ -130,6 +130,14 @@ var _ = Describe("Pod Webhook", func() {
 			Expect(hasEnvFromSecret(sc, "media-signing")).To(BeTrue())
 			Expect(hasEnvFromSecret(sc, "media-internal-token")).To(BeTrue())
 			Expect(envValue(sc, "MEDIA_PUBLIC_BASE_URL")).To(Equal("https://whatsapp-media.example.com"))
+			// The main container gains a read-write mount at the media root
+			// (the workload writes the volume).
+			main := findContainer(got, "main")
+			Expect(main.VolumeMounts).To(ContainElement(corev1.VolumeMount{
+				Name:      "media-volume",
+				MountPath: "/project/store",
+				ReadOnly:  false,
+			}))
 		})
 
 		It("Should inject the proxy for inject-proxy=true with upstream env from annotations", func() {
