@@ -10,6 +10,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -57,6 +60,12 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// Create the test namespace for all specs (idempotent).
+	By("creating the media-test namespace")
+	testNs := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "media-test"}}
+	err = k8sClient.Create(ctx, testNs)
+	Expect(err == nil || apierrors.IsAlreadyExists(err)).To(BeTrue())
 
 	// Start the manager with the WorkloadReconciler so reconciles run
 	// against the envtest apiserver.

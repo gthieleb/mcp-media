@@ -9,7 +9,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -108,15 +107,6 @@ func fetchIngress(ns, name string) (*networkingv1.Ingress, error) {
 }
 
 var _ = Describe("WorkloadReconciler", func() {
-	BeforeEach(func() {
-		// Namespace for all specs.
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS}}
-		err := k8sClient.Create(ctx, ns)
-		if err != nil && !apierrors.IsAlreadyExists(err) {
-			Expect(err).NotTo(HaveOccurred())
-		}
-	})
-
 	Context("When a workload carries inject-sidecar", func() {
 		It("Should create the media Service with serve+mint ports and an owner reference", func() {
 			By("creating an annotated sidecar deployment")

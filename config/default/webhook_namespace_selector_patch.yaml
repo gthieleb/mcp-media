@@ -1,0 +1,8 @@
+# Network-level namespace gate: the apiserver only routes admission requests
+# for pods in namespaces carrying the media-injection=enabled label to the
+# media webhook (defense in depth on top of the webhook's own check).
+- op: add
+  path: /webhooks/0/namespaceSelector
+  value:
+    matchLabels:
+      media-injection: enabled

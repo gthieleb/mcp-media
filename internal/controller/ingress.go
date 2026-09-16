@@ -3,8 +3,8 @@ package controller
 import (
 	"context"
 	"reflect"
+	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,14 +17,14 @@ import (
 // ensureMediaIngress creates the media Ingress: annotation overrides first,
 // then inheritance from the workload's existing Ingress, then the fallback
 // class.
-func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, dep *appsv1.Deployment) error {
+func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, w workloads) error {
 	log := logf.FromContext(ctx)
-	ann := dep.Spec.Template.Annotations
-	name := dep.GetName() + mediaServiceSuffix
+	ann := w.GetPodTemplateAnnotations()
+	name := w.GetName() + mediaServiceSuffix
 
-	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: dep.GetNamespace()}}
+	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: w.GetNamespace()}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
-		if err := controllerutil.SetControllerReference(dep, ing, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(w.Owner(), ing, r.Scheme); err != nil {
 			return err
 		}
 
@@ -34,7 +34,7 @@ func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, dep *appsv1
 		tlsSecret := ann[annIngressTLSSecret]
 
 		if class == "" || host == "" || issuer == "" {
-			src := r.findSourceIngress(ctx, dep)
+			src := r.findSourceIngress(ctx, w)
 			if src != nil {
 				if class == "" {
 					class = deref(src.Spec.IngressClassName)
@@ -43,7 +43,7 @@ func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, dep *appsv1
 					issuer = src.Annotations["cert-manager.io/cluster-issuer"]
 				}
 				if host == "" && len(src.Spec.Rules) > 0 {
-					host = inheritedHost(src.Spec.Rules[0].Host, dep.GetName())
+					host = inheritedHost(src.Spec.Rules[0].Host, w.GetName())
 				}
 				if tlsSecret == "" {
 					tlsSecret = tlsSecretOf(src)
@@ -54,7 +54,7 @@ func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, dep *appsv1
 			class = defaultIngressClass
 		}
 		if host == "" {
-			host = dep.GetName() + mediaHostSuffix
+			host = w.GetName() + mediaHostSuffix
 		}
 
 		ing.Spec = networkingv1.IngressSpec{
@@ -99,11 +99,11 @@ func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, dep *appsv1
 }
 
 // findSourceIngress locates the workload's existing Ingress by matching the
-// backend service name against the deployment name or its label suffixes
+// backend service name against the workload name or its label suffixes
 // (charts like whatsapp-mcp-go split service names, e.g. <name>-wa-mcp).
-func (r *WorkloadReconciler) findSourceIngress(ctx context.Context, dep *appsv1.Deployment) *networkingv1.Ingress {
+func (r *WorkloadReconciler) findSourceIngress(ctx context.Context, w workloads) *networkingv1.Ingress {
 	var list networkingv1.IngressList
-	if err := r.List(ctx, &list, client.InNamespace(dep.GetNamespace())); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(w.GetNamespace())); err != nil {
 		return nil
 	}
 	// Prefer the ingress whose backend service routes to this workload's
@@ -116,7 +116,7 @@ func (r *WorkloadReconciler) findSourceIngress(ctx context.Context, dep *appsv1.
 			}
 			for _, p := range rule.HTTP.Paths {
 				backend := p.Backend.Service.Name
-				if backend == dep.GetName() || r.backendMatchesLabels(ctx, dep, backend) {
+				if backend == w.GetName() || r.backendMatchesLabels(ctx, w, backend) {
 					return ing
 				}
 			}
@@ -126,13 +126,13 @@ func (r *WorkloadReconciler) findSourceIngress(ctx context.Context, dep *appsv1.
 }
 
 // backendMatchesLabels reports whether a Service named backend selects the
-// deployment's pod labels.
-func (r *WorkloadReconciler) backendMatchesLabels(ctx context.Context, dep *appsv1.Deployment, backend string) bool {
+// workload's pod labels.
+func (r *WorkloadReconciler) backendMatchesLabels(ctx context.Context, w workloads, backend string) bool {
 	var svc corev1.Service
-	if err := r.Get(ctx, types.NamespacedName{Namespace: dep.GetNamespace(), Name: backend}, &svc); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: w.GetNamespace(), Name: backend}, &svc); err != nil {
 		return false
 	}
-	return reflect.DeepEqual(svc.Spec.Selector, dep.Spec.Selector.MatchLabels)
+	return reflect.DeepEqual(svc.Spec.Selector, w.GetSelectorMatchLabels())
 }
 
 // inheritedHost derives the media host from the source host: a full host
@@ -159,8 +159,38 @@ func tlsSecretOf(src *networkingv1.Ingress) string {
 	return src.Spec.TLS[0].SecretName
 }
 
+// Ingress-shaping annotation keys (subset of the webhook contract).
+const (
+	annIngressClass     = "media.media/ingress-class"
+	annIngressHost      = "media.media/ingress-host"
+	annCertIssuer       = "media.media/cert-issuer"
+	annIngressTLSSecret = "media.media/ingress-tls-secret"
+)
+
 // pathTypePrefix is a pointer to the standard Prefix path type.
 var pathTypePrefix = func() *networkingv1.PathType {
 	t := networkingv1.PathTypePrefix
 	return &t
 }()
+
+// deref returns the string value of a nullable string.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// hasDot reports whether the host contains a dot (FQDN vs short host).
+func hasDot(s string) bool {
+	return strings.Contains(s, ".")
+}
+
+// cutAtFirstDot splits s at its first dot.
+func cutAtFirstDot(s string) (before, after string, found bool) {
+	i := strings.IndexByte(s, '.')
+	if i < 0 {
+		return s, "", false
+	}
+	return s[:i], s[i+1:], true
+}

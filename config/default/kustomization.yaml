@@ -54,6 +54,11 @@ patches:
   target:
     kind: Deployment
 
+# Network-level namespace gate for the media webhook (defense in depth).
+- path: webhook_namespace_selector_patch.yaml
+  target:
+    kind: MutatingWebhookConfiguration
+
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
 # Uncomment the following replacements to add the cert-manager CA injection annotations
 replacements:
