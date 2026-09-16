@@ -1,0 +1,7 @@
+# kind cluster for the media-controller E2E suite (single node suffices:
+# assertions run via kubectl/client-go against in-cluster Services).
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: media-e2e
+nodes:
+- role: control-plane

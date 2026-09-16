@@ -281,3 +281,41 @@ func hasOwnerRef(obj interface {
 	}
 	return false
 }
+
+// TestResolveRelativeAgainstMultipleRoots_... (append to suite below)
+
+var _ = Describe("WorkloadReconciler ingress self-match", func() {
+	It("Should not treat its own media Ingress as the inheritance source (host stays stable)", func() {
+		By("creating an annotated deployment")
+		dep := newTestDeployment("self-match-test", map[string]string{
+			"media.media/inject-sidecar": "true",
+		}, 7777)
+		Expect(k8sClient.Create(ctx, dep)).NotTo(HaveOccurred())
+
+		By("waiting for the media ingress")
+		Eventually(func() error {
+			_, err := fetchIngress(testNS, "self-match-test-media")
+			return err
+		}, timeout, interval).Should(Succeed())
+
+		By("waiting through several reconciles and asserting the host stays stable")
+		host := ""
+		for i := 0; i < 6; i++ {
+			time.Sleep(2 * time.Second) // reconciles fire continuously; poll across them
+			Eventually(func() string {
+				ing, err := fetchIngress(testNS, "self-match-test-media")
+				if err != nil {
+					return ""
+				}
+				return ing.Spec.Rules[0].Host
+			}, timeout, interval).Should(Not(BeEmpty()))
+			ing, err := fetchIngress(testNS, "self-match-test-media")
+			Expect(err).NotTo(HaveOccurred())
+			if host == "" {
+				host = ing.Spec.Rules[0].Host
+			}
+			Expect(ing.Spec.Rules[0].Host).To(Equal(host), "host must not grow across reconciles")
+		}
+		Expect(host).To(Equal("self-match-test-media"))
+	})
+})

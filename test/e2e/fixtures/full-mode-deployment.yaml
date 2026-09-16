@@ -1,0 +1,41 @@
+# Full-mode E2E fixture: example-mcp upstream + media proxy + sidecar in one
+# pod. The example-mcp download_file tool returns structuredContent
+# {file_path} — the enrichment middleware mints a URL for it. The "writer"
+# init container seeds the volume before the sidecar serves it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-full-e2e
+  namespace: media-e2e
+  labels:
+    app: media-full-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: media-full-e2e}
+  template:
+    metadata:
+      annotations:
+        media.media/inject-sidecar: "true"
+        media.media/inject-proxy: "true"
+        media.media/proxy-mode: "full"
+        media.media/upstream-port: "7777"
+        media.media/tool-match: "^(save_file)$"
+        media.media/volume-name: "empty"
+        media.media/volume-path: "/data"
+        media.media/public-url: "http://media-full-e2e-media.media-e2e.svc:8090"
+      labels: {app: media-full-e2e}
+    spec:
+      initContainers:
+      - name: writer
+        image: busybox:stable
+        command: ["sh", "-c", "echo Hello-from-full-e2e > /data/hello.txt && chmod 666 /data/hello.txt"]
+      containers:
+      - name: main
+        image: ghcr.io/gthieleb/mcp-media-example:example-e2e
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: MEDIA_HELLO_PATH
+          value: /data/hello.txt
+        ports:
+        - containerPort: 7777

@@ -12,9 +12,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// TestDownloadFileHandler verifies that the tool handler returns the
-// well-known hello file path regardless of the requested path.
-func TestDownloadFileHandler(t *testing.T) {
+// TestSaveFileHandler verifies that the tool handler returns the
+// well-known hello file path as structuredContent {file_path} (the WhatsApp
+// tool shape the enrichment middleware scans) plus the path as TextContent,
+// regardless of the requested path.
+func TestSaveFileHandler(t *testing.T) {
 	res, _, err := downloadFile(context.Background(), nil, downloadFileArgs{Path: "/does/not/matter.bin"})
 	if err != nil {
 		t.Fatalf("downloadFile returned error: %v", err)
@@ -28,6 +30,13 @@ func TestDownloadFileHandler(t *testing.T) {
 	}
 	if tc.Text != helloFilePath {
 		t.Errorf("expected text %q, got %q", helloFilePath, tc.Text)
+	}
+	sc, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map structuredContent, got %T", res.StructuredContent)
+	}
+	if sc["file_path"] != helloFilePath {
+		t.Errorf("structuredContent.file_path = %v, want %q", sc["file_path"], helloFilePath)
 	}
 }
 
@@ -52,7 +61,7 @@ func TestWriteHelloFile(t *testing.T) {
 
 // TestDownloadFileOverStreamableHTTP exercises the full stack: the streamable
 // HTTP handler serving an in-process MCP client that lists tools and calls
-// download_file.
+// save_file.
 func TestDownloadFileOverStreamableHTTP(t *testing.T) {
 	server := newServer()
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
@@ -72,14 +81,14 @@ func TestDownloadFileOverStreamableHTTP(t *testing.T) {
 	}
 	defer session.Close()
 
-	// The server must expose download_file with a "path" input property.
+	// The server must expose save_file with a "path" input property.
 	tools, err := session.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
 	var found bool
 	for _, tool := range tools.Tools {
-		if tool.Name == "download_file" {
+		if tool.Name == "save_file" {
 			found = true
 			raw, err := json.Marshal(tool.InputSchema)
 			if err != nil {
@@ -95,16 +104,16 @@ func TestDownloadFileOverStreamableHTTP(t *testing.T) {
 			}
 			prop, ok := schema.Properties["path"]
 			if !ok || prop.Type != "string" {
-				t.Errorf("download_file input schema missing string \"path\" property: %s", raw)
+				t.Errorf("save_file input schema missing string \"path\" property: %s", raw)
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("download_file tool not registered; got tools: %+v", tools.Tools)
+		t.Fatalf("save_file tool not registered; got tools: %+v", tools.Tools)
 	}
 
 	res, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "download_file",
+		Name:      "save_file",
 		Arguments: map[string]any{"path": "/tmp/whatever"},
 	})
 	if err != nil {

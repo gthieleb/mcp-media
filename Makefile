@@ -63,16 +63,14 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# kubectl kuberc is disabled by default for test isolation; enable with:
-# - KUBECTL_KUBERC=true
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= media-controller-test-e2e
+# E2E: the provisioning mirrors .github/workflows/e2e-kind.yml. The kind
+# cluster, :e2e images, cert-manager, the Helm release and the fixtures are
+# provisioned here; the Ginkgo suite only asserts.
+KIND_CLUSTER ?= media-e2e
+E2E_IMAGE_TAG ?= e2e
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+setup-test-e2e: ## Set up the kind E2E cluster: images, cert-manager, release, fixtures
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -82,13 +80,43 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(KIND) create cluster --config test/e2e/kind-config.yaml ;; \
 	esac
+	$(CONTAINER_TOOL) build -f Dockerfile.controller -t media-controller:$(E2E_IMAGE_TAG) .
+	$(CONTAINER_TOOL) build -f Dockerfile.sidecar   -t media-sidecar:$(E2E_IMAGE_TAG) .
+	$(CONTAINER_TOOL) build -f Dockerfile.proxy     -t media-proxy:$(E2E_IMAGE_TAG) .
+	$(CONTAINER_TOOL) build -f Dockerfile.example   -t ghcr.io/gthieleb/mcp-media-example:example-$(E2E_IMAGE_TAG) .
+	$(KIND) load docker-image media-controller:$(E2E_IMAGE_TAG) media-sidecar:$(E2E_IMAGE_TAG) \
+		media-proxy:$(E2E_IMAGE_TAG) ghcr.io/gthieleb/mcp-media-example:example-$(E2E_IMAGE_TAG) --name $(KIND_CLUSTER)
+	@command -v $(HELM) >/dev/null 2>&1 || $(MAKE) install-helm
+	helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
+	helm repo update >/dev/null
+	helm upgrade --install cert-manager jetstack/cert-manager \
+		--namespace cert-manager --create-namespace \
+		--set crds.enabled=true --wait --timeout 300s
+	kubectl apply -f test/e2e/fixtures/fake-tailscale-ingressclass.yaml
+	kubectl create ns media-e2e --dry-run=client -o yaml | kubectl apply -f -
+	kubectl label ns media-e2e media-injection=enabled --overwrite
+	kubectl -n media-e2e create secret generic media-signing \
+		--from-literal=value=e2esigningsecret0123456789abcdef0123456789 \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl -n media-e2e create secret generic media-internal-token \
+		--from-literal=value=e2etoken0123456789abcdef0123456789 \
+		--dry-run=client -o yaml | kubectl apply -f -
+	helm upgrade --install media-controller dist/chart \
+		--namespace media-controller-system --create-namespace \
+		--set manager.image.repository=media-controller \
+		--set manager.image.tag=$(E2E_IMAGE_TAG) \
+		--set manager.image.pullPolicy=Never \
+		--set media.sidecarImage=media-sidecar:$(E2E_IMAGE_TAG) \
+		--set media.proxyImage=media-proxy:$(E2E_IMAGE_TAG) \
+		--wait --timeout 300s
+	kubectl apply -f test/e2e/fixtures/full-mode-deployment.yaml
+	kubectl apply -f test/e2e/fixtures/standalone-deployment.yaml
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests against the kind E2E stack.
+	go test -tags=e2e -timeout 12m ./test/e2e/ -v
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

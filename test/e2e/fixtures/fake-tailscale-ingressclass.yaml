@@ -1,0 +1,8 @@
+# Fake IngressClass so the Reconciler's tailscale fallback path resolves in
+# kind. The controller only checks class existence, not who reconciles it.
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: tailscale
+spec:
+  controller: tailscale.com/ingress

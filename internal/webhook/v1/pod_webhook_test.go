@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -67,6 +68,7 @@ var _ = Describe("Pod Webhook", func() {
 			{"default", "ws-proxy"},
 			{"default", "ws-proxy-standalone"},
 			{"default", "ws-both"},
+			{"default", "ws-sidecar-pinned"},
 			{"media-disabled", "plain-pod"},
 		} {
 			var pod corev1.Pod
@@ -138,6 +140,41 @@ var _ = Describe("Pod Webhook", func() {
 				MountPath: "/project/store",
 				ReadOnly:  false,
 			}))
+			// Pinned images (non-:latest) must not trigger registry pulls;
+			// the :latest compiled default keeps Always semantics.
+			if !strings.HasSuffix(sc.Image, ":latest") {
+				Expect(sc.ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
+			} else {
+				Expect(sc.ImagePullPolicy).To(Or(Equal(corev1.PullAlways), Equal(corev1.PullPolicy(""))))
+			}
+		})
+
+		It("Should set IfNotPresent when the injected image is pinned", func() {
+			By("pinning the sidecar image via ConfigureImages")
+			ConfigureImages("media-sidecar:e2e", "media-proxy:e2e", "", "")
+			DeferCleanup(func() {
+				ConfigureImages("ghcr.io/gthieleb/mcp-media-sidecar:latest", "ghcr.io/gthieleb/mcp-media-proxy:latest", "", "")
+			})
+
+			pod := annotatedPod("default", "ws-sidecar-pinned", map[string]string{
+				InjectSidecar: "true",
+				VolumeName:    "empty",
+			})
+			Expect(k8sClient.Create(ctx, pod)).NotTo(HaveOccurred())
+
+			By("verifying the sidecar carries IfNotPresent")
+			var got *corev1.Pod
+			Eventually(func() bool {
+				var err error
+				got, err = fetchPod(pod)
+				if err != nil {
+					return false
+				}
+				return findContainer(got, sidecarContainerName) != nil
+			}, timeout, interval).Should(BeTrue())
+			sc := findContainer(got, sidecarContainerName)
+			Expect(sc.Image).To(Equal("media-sidecar:e2e"))
+			Expect(sc.ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
 		})
 
 		It("Should inject the proxy for inject-proxy=true with upstream env from annotations", func() {

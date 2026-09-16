@@ -4,10 +4,13 @@
 package e2e
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -16,18 +19,32 @@ import (
 )
 
 var (
-	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/media-controller:v0.0.1"
+	// controllerImage is the media-controller image built and loaded by this
+	// suite (tagged :e2e by the harness — locally loaded, never pulled).
+	controllerImage = envOr("CONTROLLER_IMG", "media-controller:e2e")
+	// sidecarImage / proxyImage are injected by the webhook; they are passed
+	// to the Helm release via --set in the harness so both point at locally
+	// loaded :e2e images.
+	sidecarImage = envOr("SIDECAR_IMG", "media-sidecar:e2e")
+	proxyImage   = envOr("PROXY_IMG", "media-proxy:e2e")
+	helmRelease  = "media-controller"
+
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
 
-// TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
-//
-// To enable kubectl kuberc (use custom kubectl configurations), set: KUBECTL_KUBERC=true
-// By default, kuberc is disabled to ensure consistent test behavior across different environments.
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// envOr reads a named env var, falling back to def.
+func envOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// TestE2E runs the e2e test suite against a pre-provisioned kind cluster.
+// The harness (CI workflow / make setup-test-e2e) creates the cluster, loads
+// the :e2e images, installs cert-manager, deploys the media-controller Helm
+// release and seeds the media-e2e namespace. This suite only asserts.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting media-controller e2e test suite\n")
@@ -35,69 +52,78 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
-
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
-
-	configureKubectlKubeRC()
-	setupCertManager()
+	// The harness (workflow or make) provisions the cluster and the release.
+	// A lightweight readiness check keeps the suite honest when run against
+	// a cluster the harness has not finished wiring yet.
+	By("waiting for the media-controller deployment to be ready")
+	verifyDeployed := func(g Gomega) {
+		out, err := kube("rollout", "status", "deploy/"+helmRelease+"-controller-manager",
+			"-n", controllerNamespace, "--timeout=10s")
+		g.Expect(err).NotTo(HaveOccurred(), "media-controller not deployed: %s", out)
+	}
+	EventuallyWithOffset(1, verifyDeployed, 5*time.Minute, time.Second).Should(Succeed())
 })
 
-var _ = AfterSuite(func() {
-	teardownCertManager()
-})
+// controllerNamespace is where the Helm release deploys the manager.
+const controllerNamespace = "media-controller-system"
 
-// Disable kubectl kuberc by default for test isolation.
-// This prevents local kubectl configurations from affecting test behavior.
-// To enable kuberc, set: KUBECTL_KUBERC=true
-func configureKubectlKubeRC() {
-	if os.Getenv("KUBECTL_KUBERC") != "true" {
-		By("disabling kubectl kuberc for test isolation")
-		err := os.Setenv("KUBECTL_KUBERC", "false")
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to disable kubectl kuberc")
-		_, _ = fmt.Fprintf(GinkgoWriter,
-			"kubectl kuberc disabled for consistent test behavior (override with KUBECTL_KUBERC=true)\n")
-	} else {
-		_, _ = fmt.Fprintf(GinkgoWriter, "kubectl kuberc enabled (KUBECTL_KUBERC=true)\n")
-	}
+// e2eNamespace is the namespace the fixtures run in (labeled
+// media-injection=enabled by the harness).
+const e2eNamespace = "media-e2e"
+
+// kube runs kubectl and returns its combined output.
+func kube(args ...string) (string, error) {
+	cmd := exec.Command("kubectl", args...)
+	return utils.Run(cmd)
 }
 
-// setupCertManager installs CertManager if needed for webhook tests.
-// Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
-func setupCertManager() {
-	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
-		return
-	}
-
-	By("checking if CertManager is already installed")
-	if utils.IsCertManagerCRDsInstalled() {
-		_, _ = fmt.Fprintf(GinkgoWriter, "CertManager is already installed. Skipping installation.\n")
-		return
-	}
-
-	// Mark for cleanup before installation to handle interruptions and partial installs.
-	shouldCleanupCertManager = true
-
-	By("installing CertManager")
-	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
+// kubeOK runs kubectl and fails the spec on error.
+func kubeOK(args ...string) string {
+	out, err := kube(args...)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "kubectl %v failed: %s", args, out)
+	return out
 }
 
-// teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
-// This ensures we only remove what we installed.
-func teardownCertManager() {
-	if !shouldCleanupCertManager {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")
-		return
-	}
+// secretValue reads a Secret's data key and returns the decoded value.
+func secretValue(name, key string) string {
+	out := kubeOK("get", "secret", name, "-n", e2eNamespace,
+		"-o", "jsonpath={.data."+key+"}")
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "decode secret %s/%s", name, key)
+	return string(raw)
+}
 
-	By("uninstalling CertManager")
-	utils.UninstallCertManager()
+// curlPod runs a curl command in an ephemeral pod, waits for completion
+// and returns the container output (logs). The pod is deleted afterwards.
+func curlPod(name string, args ...string) string {
+	// Best-effort cleanup of a previous run with the same name.
+	_, _ = kube("delete", "pod", name, "-n", e2eNamespace, "--ignore-not-found", "--wait=false")
+	runArgs := append([]string{
+		"run", name, "--restart=Never", "--image=curlimages/curl:latest",
+		"-n", e2eNamespace, "--",
+	}, args...)
+	_, err := kube(runArgs...)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "run pod %s failed", name)
+	DeferCleanup(func() {
+		_, _ = kube("delete", "pod", name, "-n", e2eNamespace, "--ignore-not-found")
+	})
+	EventuallyWithOffset(1, func() string {
+		out, err := kube("get", "pod", name, "-n", e2eNamespace,
+			"-o", "jsonpath={.status.phase}")
+		if err != nil {
+			return ""
+		}
+		return out
+	}, 2*time.Minute, time.Second).Should(Or(Equal("Succeeded"), Equal("Failed")),
+		"curl pod %s never completed", name)
+	out, err := kube("logs", name, "-n", e2eNamespace)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "curl pod %s logs failed", name)
+	return out
+}
+
+// containerNames lists the container names of a pod.
+func containerNames(pod string) []string {
+	out := kubeOK("get", "pod", pod, "-n", e2eNamespace,
+		"-o", "jsonpath={.spec.containers[*].name}")
+	return strings.Fields(out)
 }

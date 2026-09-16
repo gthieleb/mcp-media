@@ -179,7 +179,7 @@ networkPolicy:
 ## Media injection values (T3.4): images + secrets the webhook uses when
 ## injecting sidecar/proxy containers into annotated pods.
 media:
-  sidecarImage: "ghcr.io/gthieleb/mcp-media-sidecar:latest"
-  proxyImage: "ghcr.io/gthieleb/mcp-media-proxy:latest"
+  sidecarImage: "ghcr.io/gthieleb/mcp-media-sidecar:sidecar-v0.1.0"
+  proxyImage: "ghcr.io/gthieleb/mcp-media-proxy:proxy-v0.1.0"
   signingSecretName: "media-signing"
   internalTokenSecretName: "media-internal-token"

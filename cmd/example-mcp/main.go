@@ -21,10 +21,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// helloFilePath is the well-known file returned by the save_file tool and
+// served by the media sidecar in later tasks. MEDIA_HELLO_PATH overrides it
+// (e.g. the shared media volume path in E2E fixtures).
+var helloFilePath = envOr("MEDIA_HELLO_PATH", "/tmp/hello-world.txt")
+
 const (
-	// helloFilePath is the well-known file returned by the download_file
-	// tool and served by the media sidecar in later tasks.
-	helloFilePath = "/tmp/hello-world.txt"
 	// helloFileContent is the exact content written to helloFilePath on
 	// startup.
 	helloFileContent = "Hello, World!\n"
@@ -46,6 +48,11 @@ func downloadFile(_ context.Context, _ *mcp.CallToolRequest, _ downloadFileArgs)
 		Content: []mcp.Content{
 			&mcp.TextContent{Text: helloFilePath},
 		},
+		// WhatsApp tool shape: the enrichment middleware scans
+		// structuredContent for path fields (file_path/path/filename).
+		StructuredContent: map[string]any{
+			"file_path": helloFilePath,
+		},
 	}, nil, nil
 }
 
@@ -55,9 +62,12 @@ func newServer() *mcp.Server {
 		Name:    "example-mcp",
 		Version: "0.1.0",
 	}, nil)
+	// save_file mirrors the WhatsApp download_media tool shape (path field in
+	// structuredContent) without colliding with the proxy's generic
+	// download_file tool name.
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "download_file",
-		Description: "Download a file; returns the path of the downloaded file",
+		Name:        "save_file",
+		Description: "Save a file; returns the sandbox path of the saved file",
 	}, downloadFile)
 	return server
 }
@@ -68,6 +78,14 @@ func writeHelloFile(path string) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+// envOr reads a named env var, falling back to def when unset.
+func envOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
 }
 
 func main() {

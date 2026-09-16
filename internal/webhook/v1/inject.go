@@ -3,6 +3,7 @@ package v1
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -62,7 +63,8 @@ func addSidecar(pod *corev1.Pod, req injectionRequest) {
 			{Name: "serve", ContainerPort: sidecarServePort},
 			{Name: "mint", ContainerPort: sidecarMintPort},
 		},
-		Env: env,
+		Env:             env,
+		ImagePullPolicy: pullPolicyFor(sidecarImage),
 		VolumeMounts: []corev1.VolumeMount{{
 			Name:      mediaVolumeName,
 			MountPath: path,
@@ -71,7 +73,7 @@ func addSidecar(pod *corev1.Pod, req injectionRequest) {
 	}
 	pod.Spec.Containers = append(pod.Spec.Containers, sc)
 	addMediaVolume(pod, req)
-	mountMainContainer(pod, req, path)
+	mountWorkloadContainers(pod, req, path)
 }
 
 // addProxy appends the mcp-media-proxy container with its env contract.
@@ -158,21 +160,38 @@ func addMediaVolume(pod *corev1.Pod, req injectionRequest) {
 	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
 }
 
-// mountMainContainer gives the first main container a read-write mount of
-// the media volume at its media root (per plan: the workload writes the
-// volume, the sidecar consumes it read-only). Idempotent.
-func mountMainContainer(pod *corev1.Pod, req injectionRequest, path string) {
-	if len(pod.Spec.Containers) == 0 {
-		return
+// mountWorkloadContainers gives the workload's own containers (init and
+// main, skipping injected ones) a read-write mount of the media volume at
+// its media root — per plan: the workload writes the volume, the sidecar
+// consumes it read-only. A mount at the same path or of the same volume is
+// left untouched (charts like whatsapp-mcp-go already mount their PVC).
+func mountWorkloadContainers(pod *corev1.Pod, req injectionRequest, path string) {
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if c.Name == sidecarName || c.Name == proxyName {
+			continue
+		}
+		mountIfAbsent(c, mediaVolumeName, path)
 	}
-	main := &pod.Spec.Containers[0]
-	for _, m := range main.VolumeMounts {
-		if m.Name == mediaVolumeName {
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if c.Name == sidecarName || c.Name == proxyName {
+			continue
+		}
+		mountIfAbsent(c, mediaVolumeName, path)
+	}
+}
+
+// mountIfAbsent adds a rw volume mount unless the container already mounts
+// the volume name or already uses the mount path.
+func mountIfAbsent(c *corev1.Container, volumeName, path string) {
+	for _, m := range c.VolumeMounts {
+		if m.Name == volumeName || m.MountPath == path {
 			return
 		}
 	}
-	main.VolumeMounts = append(main.VolumeMounts, corev1.VolumeMount{
-		Name:      mediaVolumeName,
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+		Name:      volumeName,
 		MountPath: path,
 		ReadOnly:  false,
 	})
@@ -197,6 +216,17 @@ func injectTargetName(pod *corev1.Pod) string {
 		}
 	}
 	return pod.Name
+}
+
+// pullPolicyFor returns IfNotPresent for pinned image references (any tag
+// other than "latest") so locally loaded images in kind-style clusters are
+// used without registry access. The :latest default (Always semantics)
+// stays untouched.
+func pullPolicyFor(image string) corev1.PullPolicy {
+	if strings.HasSuffix(image, ":latest") || !strings.Contains(image, ":") {
+		return ""
+	}
+	return corev1.PullIfNotPresent
 }
 
 // secretKeyRef builds a whole-secret env source (single-key secret layout:

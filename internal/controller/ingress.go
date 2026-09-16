@@ -173,15 +173,24 @@ func (r *WorkloadReconciler) findSourceIngress(ctx context.Context, w workloads)
 		return nil
 	}
 	// Prefer the ingress whose backend service routes to this workload's
-	// selector labels.
+	// selector labels. The media Ingress itself is excluded: its backend is
+	// the media Service (same selector), and treating it as the source would
+	// append the -media suffix to the host on every reconcile.
+	mediaName := w.GetName() + mediaServiceSuffix
 	for i := range list.Items {
 		ing := &list.Items[i]
+		if ing.GetName() == mediaName {
+			continue
+		}
 		for _, rule := range ing.Spec.Rules {
 			if rule.HTTP == nil {
 				continue
 			}
 			for _, p := range rule.HTTP.Paths {
 				backend := p.Backend.Service.Name
+				if backend == mediaName {
+					continue
+				}
 				if backend == w.GetName() || r.backendMatchesLabels(ctx, w, backend) {
 					return ing
 				}

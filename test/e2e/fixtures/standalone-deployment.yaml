@@ -1,0 +1,29 @@
+# Standalone E2E fixture (agent-pod egress): proxy in standalone mode with no
+# upstream — only the generic tools, no mirroring, no enrichment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-standalone-e2e
+  namespace: media-e2e
+  labels:
+    app: media-standalone-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: media-standalone-e2e}
+  template:
+    metadata:
+      annotations:
+        media.media/inject-sidecar: "true"
+        media.media/inject-proxy: "true"
+        media.media/proxy-mode: "standalone"
+        media.media/volume-name: "empty"
+        media.media/volume-path: "/data"
+        media.media/public-url: "http://media-standalone-e2e-media.media-e2e.svc:8090"
+      labels: {app: media-standalone-e2e}
+    spec:
+      containers:
+      - name: main
+        image: busybox:stable
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "echo 'Hello from standalone e2e!' > /data/hello.txt && sleep 3600"]

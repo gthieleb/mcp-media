@@ -1,0 +1,104 @@
+# e2e-kind — full-stack E2E in kind: build :e2e images, kind load, cert-manager,
+# media-controller Helm release, fixtures, then the Ginkgo E2E suite.
+# The suite only asserts; this workflow provisions the environment.
+name: e2e-kind
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-kind-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CONTROLLER_IMG: media-controller:e2e
+      SIDECAR_IMG: media-sidecar:e2e
+      PROXY_IMG: media-proxy:e2e
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build :e2e images
+        run: |
+          docker build -f Dockerfile.controller -t $CONTROLLER_IMG .
+          docker build -f Dockerfile.sidecar   -t $SIDECAR_IMG .
+          docker build -f Dockerfile.proxy     -t $PROXY_IMG .
+          docker build -f Dockerfile.example   -t ghcr.io/gthieleb/mcp-media-example:example-e2e .
+
+      - name: Create kind cluster
+        run: |
+          curl -sLo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+          kind create cluster --config test/e2e/kind-config.yaml
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image $CONTROLLER_IMG $SIDECAR_IMG $PROXY_IMG \
+            ghcr.io/gthieleb/mcp-media-example:example-e2e --name media-e2e
+
+      - name: Install cert-manager (wait for readiness)
+        run: |
+          curl -sLo /tmp/curl https://github.com/moparisthebest/static-curl/releases/latest/download/curl-amd64
+          chmod +x /tmp/curl && sudo mv /tmp/curl /usr/local/bin/hcurl
+          sudo cp "$(command -v helm)" /usr/local/bin/helm 2>/dev/null || true
+          if ! command -v helm >/dev/null 2>&1; then
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash
+          fi
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --namespace cert-manager --create-namespace \
+            --set crds.enabled=true --wait --timeout 300s
+
+      - name: Wire the media e2e namespace
+        run: |
+          kubectl apply -f test/e2e/fixtures/fake-tailscale-ingressclass.yaml
+          kubectl create ns media-e2e
+          kubectl label ns media-e2e media-injection=enabled
+          kubectl -n media-e2e create secret generic media-signing \
+            --from-literal=value=e2esigningsecret0123456789abcdef0123456789
+          kubectl -n media-e2e create secret generic media-internal-token \
+            --from-literal=value=e2etoken0123456789abcdef0123456789
+
+      - name: Deploy media-controller via Helm
+        run: |
+          helm upgrade --install media-controller dist/chart \
+            --namespace media-controller-system --create-namespace \
+            --set manager.image.repository=media-controller \
+            --set manager.image.tag=e2e \
+            --set manager.image.pullPolicy=Never \
+            --set media.sidecarImage=media-sidecar:e2e \
+            --set media.proxyImage=media-proxy:e2e \
+            --wait --timeout 300s
+
+      - name: Apply fixtures
+        run: |
+          kubectl apply -f test/e2e/fixtures/full-mode-deployment.yaml
+          kubectl apply -f test/e2e/fixtures/standalone-deployment.yaml
+
+      - name: Run E2E suite
+        run: go test -tags=e2e -timeout 12m ./test/e2e/ -v
+
+      - name: Export kind logs on failure
+        if: failure()
+        run: |
+          kind export logs --name media-e2e /tmp/kind-logs || true
+          kubectl get events -A --sort-by=.lastTimestamp || true
+          kubectl get pods -A || true
