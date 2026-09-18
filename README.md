@@ -172,6 +172,31 @@ proxy mints via `localhost:8091`.
   only.
 - Signed URLs are never logged; TTL cap and inline limit are enforced.
 
+## Live deployment (qnap-k3s)
+
+The stack runs live: the media-controller manages injection in `mcp` via
+cert-manager + MutatingWebhook; WhatsApp is the first annotated workload.
+
+| Component | Live state |
+|---|---|
+| controller | `media-controller-system`, image `controller-v0.1.0-rc6`, k3s nodeAffinity |
+| wa-bridge pod | `main + media-sidecar` (ro mount of PVC `whatsapp-mcp-go` at `/project/store`) |
+| wa-mcp pod | `main + mcp-media-proxy` (full mode, upstream localhost:5777, targetPort patched 5777→5780) |
+| media ingress | `https://whatsapp-mcp-go-media` (tailscale node + auto-TLS) |
+
+End-to-end verified live: mint → signed URL → fetch 200 → Range 206 → tampered
+signature 403. The `whatsapp-k8s-media` skill documents the agent-facing flow
+(URL fetch replaces the helper-pod workaround).
+
+## SEP-2631 / SEP-2532 alignment
+
+The enriched tool-result shape maps onto the MCP tool-result extensions
+discussed in SEP-2631/SEP-2532 (structured file values with URI, MIME type and
+size). `structuredContent = {url, mime_type, size_bytes, filename, expires_at,
+inline_included}` carries the same fields as `FileValue`; when the proposal
+lands upstream, the data plane (sidecar mint API + signed URLs) remains
+unchanged and only the result serialization adapts.
+
 ## License
 
 MIT
