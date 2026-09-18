@@ -83,6 +83,11 @@ func (r *WorkloadReconciler) ensureMediaIngress(ctx context.Context, w workloads
 				Hosts:      []string{host},
 				SecretName: tlsSecret,
 			}}
+		} else if class == "tailscale" {
+			// The tailscale operator provisions its proxy node and auto-TLS
+			// only for ingresses carrying a TLS block (hosts suffice; the
+			// operator creates and manages the secret itself).
+			ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{host}}}
 		}
 		if issuer != "" {
 			if ing.Annotations == nil {
