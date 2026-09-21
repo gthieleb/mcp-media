@@ -1,0 +1,6 @@
+# gitleaks allowlist: fixed 32-byte test fixtures in test files are not secrets.
+[allowlist]
+description = "test fixtures with fixed dummy secrets"
+paths = [
+  '''(?i)_test\.go$''',
+]
