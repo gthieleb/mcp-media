@@ -27,12 +27,12 @@ jobs:
           echo "KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.x -p path)" >> "$GITHUB_ENV"
       - run: go test ./...
 
-  # Per-image build/push job: triggers on matching tag prefixes.
-  #   sidecar-v*  → ghcr.io/gthieleb/mcp-media-sidecar:<git-tag>
-  #   proxy-v*    → ghcr.io/gthieleb/mcp-media-proxy:<git-tag>
-  #   example-v* → ghcr.io/gthieleb/mcp-media-example:<git-tag>
-  #   controller-v* → ghcr.io/gthieleb/mcp-media-controller:<git-tag>
-  # The image tag is the full git tag (e.g. "proxy-v0.1.0") for 1:1 traceability.
+  # Per-image build/push job: ONE image per tag push — the tag prefix
+  # selects the image (sidecar-v* → mcp-media-sidecar:<git-tag>, etc.).
+  # 2026-10-27 fix: was a 4-way matrix that cross-tagged every package on
+  # every tag (e.g. mcp-media-sidecar:proxy-v0.2.0) — sidecar/proxy/example
+  # tolerated it, the unlinked mcp-media-controller package denied with
+  # read_package and marked the run failed even when the correct leg pushed.
   images:
     needs: unit
     runs-on: ubuntu-latest
@@ -40,13 +40,19 @@ jobs:
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [sidecar, proxy, example, controller]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+      - name: Resolve image from tag
+        id: resolve
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          image="${tag%%-v*}"
+          case "${image}" in
+            sidecar|proxy|example|controller) ;;
+            *) echo "::error::tag ${tag} does not map to a Dockerfile"; exit 1 ;;
+          esac
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
@@ -56,14 +62,14 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/gthieleb/mcp-media-${{ matrix.image }}
+          images: ghcr.io/gthieleb/mcp-media-${{ steps.resolve.outputs.image }}
           tags: |
             type=ref,event=tag
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.${{ matrix.image }}
+          file: Dockerfile.${{ steps.resolve.outputs.image }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
