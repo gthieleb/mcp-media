@@ -179,9 +179,9 @@ cert-manager + MutatingWebhook; WhatsApp is the first annotated workload.
 
 | Component | Live state |
 |---|---|
-| controller | `media-controller-system`, image `controller-v0.1.0-rc6`, k3s nodeAffinity |
+| controller | `media-controller-system`, image `controller-v0.1.0-rc7`, k3s nodeAffinity (2026-10-27: rc7 = `auth-token-secret` webhook annotation; GHCR package linked for workflow pushes) |
 | wa-bridge pod | `main + media-sidecar` (ro mount of PVC `whatsapp-mcp-go` at `/project/store`) |
-| wa-mcp pod | `main + mcp-media-proxy` (full mode, upstream localhost:5777, targetPort patched 5777→5780) |
+| wa-mcp pod | `main + mcp-media-proxy` (full mode, upstream localhost:5777, targetPort patched 5777→5780; proxy `proxy-v0.2.0` with `MEDIA_AUTH_TOKEN`: downstream bearer check + upstream token forwarding, 401 without header) |
 | media ingress | `https://whatsapp-mcp-go-media` (tailscale node + auto-TLS) |
 
 End-to-end verified live: mint → signed URL → fetch 200 → Range 206 → tampered
