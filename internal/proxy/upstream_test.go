@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -623,4 +624,88 @@ func TestForwardNotBlockedDuringSlowSync(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("SyncTools did not finish after unblock")
 	}
+}
+
+// TestBearerRoundTripperInjectsHeader pins the upstream auth contract: every
+// request the MCP client session makes (POSTs and the standalone SSE GET)
+// carries "Authorization: Bearer <token>", and the original request stays
+// untouched (headers are cloned, never mutated in place).
+func TestBearerRoundTripperInjectsHeader(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef0123"
+
+	var gotAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rt := &bearerRoundTripper{token: token}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	req.Header.Set("X-Own", "kept")
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if auth, _ := gotAuth.Load().(string); auth != "Bearer "+token {
+		t.Errorf("upstream Authorization = %q, want %q", auth, "Bearer "+token)
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Error("original request was mutated in place (Authorization set)")
+	}
+	if req.Header.Get("X-Own") != "kept" {
+		t.Error("original request headers lost")
+	}
+}
+
+// TestConnectUpstreamAuthEndToEnd runs a full upstream session against an
+// auth-enforcing MCP server: the session only establishes when the bearer
+// token is presented (mirror of the wa-mcp/email-mcp guard chain).
+func TestConnectUpstreamAuthEndToEnd(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef0123"
+
+	// Upstream MCP server guarded exactly like the SDK v2 http servers.
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "guarded", Version: "0.1.0"}, nil)
+	guarded := httptest.NewServer(bearerGuard(token,
+		mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return upstream }, nil)))
+	defer guarded.Close()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "0.2.0"}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Without the token the session is rejected with 401.
+	bare := NewUpstream(guarded.URL, &UpstreamOptions{Logger: testLogger()})
+	if err := bare.Connect(ctx, server); err == nil {
+		bare.Close()
+		t.Fatal("Connect without auth: expected error, got nil")
+	} else {
+		bare.Close()
+	}
+
+	// With the token the session establishes (Connect performs the initial
+	// tool sync internally — zero upstream tools must sync cleanly).
+	auth := NewUpstream(guarded.URL, &UpstreamOptions{Logger: testLogger(), AuthToken: token})
+	if err := auth.Connect(ctx, server); err != nil {
+		t.Fatalf("Connect with auth: %v", err)
+	}
+	defer func() { _ = auth.Close() }()
+}
+
+// bearerGuard mirrors the SDK v2 http server bearer middleware so the
+// end-to-end test exercises the real rejection path (401 + challenge).
+func bearerGuard(token string, next http.Handler) http.Handler {
+	expected := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), expected) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -67,6 +67,7 @@ var _ = Describe("Pod Webhook", func() {
 			{"default", "ws-sidecar"},
 			{"default", "ws-proxy"},
 			{"default", "ws-proxy-standalone"},
+			{"default", "ws-proxy-auth"},
 			{"default", "ws-both"},
 			{"default", "ws-sidecar-pinned"},
 			{"media-disabled", "plain-pod"},
@@ -203,6 +204,39 @@ var _ = Describe("Pod Webhook", func() {
 			Expect(envValue(pc, "PROXY_MODE")).To(Equal("full"))
 			Expect(envValue(pc, "PROXY_LISTEN_ADDR")).To(Equal(":5780"))
 			Expect(hasEnvFromSecret(pc, "media-internal-token")).To(BeTrue())
+			// No auth-token-secret annotation → no MEDIA_AUTH_TOKEN env.
+			Expect(hasEnvKey(pc, "MEDIA_AUTH_TOKEN")).To(BeFalse())
+		})
+
+		It("Should inject MEDIA_AUTH_TOKEN from the auth-token-secret annotation", func() {
+			By("creating a pod annotated with inject-proxy and auth-token-secret")
+			pod := annotatedPod("default", "ws-proxy-auth", map[string]string{
+				InjectProxy:     "true",
+				UpstreamPort:    "5777",
+				AuthTokenSecret: "whatsapp-mcp-go-auth-token",
+			})
+			Expect(k8sClient.Create(ctx, pod)).NotTo(HaveOccurred())
+
+			By("verifying the proxy env carries MEDIA_AUTH_TOKEN via secretKeyRef")
+			var got *corev1.Pod
+			Eventually(func() bool {
+				var err error
+				got, err = fetchPod(pod)
+				if err != nil {
+					return false
+				}
+				return findContainer(got, proxyContainerName) != nil
+			}, timeout, interval).Should(BeTrue())
+
+			pc := findContainer(got, proxyContainerName)
+			Expect(hasEnvKey(pc, "MEDIA_AUTH_TOKEN")).To(BeTrue())
+			Expect(hasEnvFromSecret(pc, "whatsapp-mcp-go-auth-token")).To(BeTrue())
+			// Single-key secret contract: key "value".
+			for _, e := range pc.Env {
+				if e.Name == "MEDIA_AUTH_TOKEN" {
+					Expect(e.ValueFrom.SecretKeyRef.Key).To(Equal("value"))
+				}
+			}
 		})
 
 		It("Should inject the proxy in standalone mode when proxy-mode=standalone", func() {

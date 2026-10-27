@@ -9,11 +9,29 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// bearerRoundTripper adds "Authorization: Bearer <token>" to every upstream
+// request, including the standalone SSE stream the MCP client opens after
+// initialize (StreamableClientTransport shares one HTTPClient for POSTs and
+// the SSE GET alike, so the header covers session re-establishment too).
+type bearerRoundTripper struct {
+	token string
+}
+
+func (r *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
+	clone.Header.Set("Authorization", "Bearer "+r.token)
+	return http.DefaultTransport.RoundTrip(clone)
+}
 
 // syncTimeout bounds a single tools/list network round trip during
 // SyncTools. Without it a hung upstream would wedge the sync section
@@ -41,9 +59,10 @@ const syncTimeout = 30 * time.Second
 // listMu serializes whole SyncTools runs (startup sync vs.
 // tool-list-changed re-sync); it may be held across the network listing.
 type Upstream struct {
-	endpoint string
-	logger   *slog.Logger
-	client   *mcp.Client
+	endpoint  string
+	authToken string
+	logger    *slog.Logger
+	client    *mcp.Client
 
 	mu       sync.Mutex // guards session, server and mirrored (fast sections only)
 	session  *mcp.ClientSession
@@ -65,6 +84,13 @@ type UpstreamOptions struct {
 	// same-name tools and offers no way to enumerate registered tools, so
 	// collisions can only be avoided via this list.
 	ReservedTools []string
+	// AuthToken is an optional bearer token presented on every upstream
+	// request ("Authorization: Bearer <token>"). Required when the upstream
+	// MCP server enforces client auth (e.g. the whatsapp-mcp-go server's
+	// MCP_AUTH_TOKEN guard or email-mcp's EMAIL_MCP_HTTP_TOKEN) and the
+	// proxy's session would otherwise be rejected with 401. Empty disables
+	// upstream auth (loopback-only upstreams).
+	AuthToken string
 }
 
 // NewUpstream returns an Upstream mirroring the MCP server at endpoint
@@ -83,6 +109,7 @@ func NewUpstream(endpoint string, opts *UpstreamOptions) *Upstream {
 		for _, name := range opts.ReservedTools {
 			u.reserved[name] = struct{}{}
 		}
+		u.authToken = opts.AuthToken
 	}
 	u.client = mcp.NewClient(&mcp.Implementation{
 		Name:    "mcp-media-proxy",
@@ -100,9 +127,14 @@ func NewUpstream(endpoint string, opts *UpstreamOptions) *Upstream {
 // the standalone SSE stream enabled so that tool-list-changed notifications
 // are received and trigger a re-sync.
 func (u *Upstream) Connect(ctx context.Context, server *mcp.Server) error {
-	session, err := u.client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: u.endpoint,
-	}, nil)
+	transport := &mcp.StreamableClientTransport{Endpoint: u.endpoint}
+	if u.authToken != "" {
+		// Upstream servers with enforced client auth (MCP_AUTH_TOKEN /
+		// EMAIL_MCP_HTTP_TOKEN guards) reject unauthenticated sessions with
+		// 401 — carry the bearer token on every upstream request.
+		transport.HTTPClient = &http.Client{Transport: &bearerRoundTripper{token: u.authToken}}
+	}
+	session, err := u.client.Connect(ctx, transport, nil)
 	if err != nil {
 		return fmt.Errorf("proxy: connect upstream %q: %w", u.endpoint, err)
 	}

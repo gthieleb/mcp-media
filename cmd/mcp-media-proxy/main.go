@@ -27,6 +27,15 @@
 //	                     unset in standalone mode)
 //	MINT_URL             base URL of the sidecar mint API (required, http(s))
 //	MEDIA_INTERNAL_TOKEN bearer token for POST /mint (required, non-empty)
+//	MEDIA_AUTH_TOKEN     bearer token enforced on downstream clients and
+//	                     presented to the upstream MCP server (optional;
+//	                     unset = no auth. When set, requests without a
+//	                     matching "Authorization: Bearer" header are
+//	                     rejected with 401, and every upstream request
+//	                     carries the same header so auth-enforcing
+//	                     upstreams (MCP_AUTH_TOKEN / EMAIL_MCP_HTTP_TOKEN
+//	                     guards) accept the proxy session. Minimum 32
+//	                     characters to match those upstream guards.)
 //	TOOL_MATCH           regex selecting tool names for response enrichment;
 //	                     empty disables enrichment (optional, full mode only)
 //	PROXY_LISTEN_ADDR    downstream listen address (default ":5780")
@@ -39,6 +48,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -59,7 +69,7 @@ const (
 	defaultListenAddr = ":5780"
 
 	proxyName    = "mcp-media-proxy"
-	proxyVersion = "0.1.0"
+	proxyVersion = "0.2.0"
 
 	// genericTools are owned by this process; upstream tools with these
 	// names are never mirrored over them.
@@ -78,6 +88,7 @@ type config struct {
 	UpstreamURL    string // "" → no upstream (standalone)
 	MintURL        string
 	Token          string
+	AuthToken      string // optional downstream+upstream bearer token; "" → no auth
 	ToolMatch      string // "" → enrichment disabled
 	ListenAddr     string
 	InlineMaxBytes int64
@@ -139,6 +150,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.Token = getenv("MEDIA_INTERNAL_TOKEN")
 	if cfg.Token == "" {
 		return config{}, errors.New("MEDIA_INTERNAL_TOKEN is required")
+	}
+
+	cfg.AuthToken = getenv("MEDIA_AUTH_TOKEN")
+	if cfg.AuthToken != "" && len(cfg.AuthToken) < 32 {
+		// Matches the MCP_AUTH_TOKEN / EMAIL_MCP_HTTP_TOKEN guards of the
+		// upstream MCP servers: a too-short token would be refused there
+		// anyway — fail fast at the proxy instead of at session connect.
+		return config{}, errors.New("MEDIA_AUTH_TOKEN is too short (need at least 32 characters)")
 	}
 
 	if cfg.Mode == proxy.ModeFull {
@@ -212,6 +231,8 @@ func (c config) logValue() slog.Value {
 		slog.Int64("inline_max_bytes", c.InlineMaxBytes),
 		slog.String("fetch_base_url", c.FetchBaseURL),
 		slog.Int("token_bytes", len(c.Token)),
+		slog.Bool("auth_enabled", c.AuthToken != ""),
+		slog.Int("auth_token_bytes", len(c.AuthToken)),
 	)
 }
 
@@ -248,6 +269,7 @@ func run(ctx context.Context, cfg config) error {
 		up := proxy.NewUpstream(cfg.UpstreamURL, &proxy.UpstreamOptions{
 			Logger:        logger,
 			ReservedTools: []string{genericStreamMedia, genericDownload},
+			AuthToken:     cfg.AuthToken,
 		})
 		if err := up.Connect(ctx, server); err != nil {
 			return fmt.Errorf("upstream: %w", err)
@@ -255,9 +277,20 @@ func run(ctx context.Context, cfg config) error {
 		defer func() { _ = up.Close() }()
 	}
 
+	handler := http.Handler(
+		mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil),
+	)
+	if cfg.AuthToken != "" {
+		// Same guard model as the auth-enforcing upstream MCP servers: the
+		// proxy owns the client-facing endpoint (the service targetPort is
+		// mutated to this container), so this is where downstream auth is
+		// enforced.
+		handler = bearerAuth(cfg.AuthToken, handler)
+	}
+
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil),
+		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
@@ -301,4 +334,20 @@ func main() {
 		slog.Error("mcp-media-proxy terminated with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// bearerAuth rejects requests that don't carry "Authorization: Bearer <token>".
+// Constant-time comparison; the challenge advertises the scheme so MCP
+// clients (opencode etc.) surface an authentication prompt instead of a bare
+// 401. Mirrors the guard of the wa-mcp/email-mcp SDK v2 http servers.
+func bearerAuth(token string, next http.Handler) http.Handler {
+	expected := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), expected) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

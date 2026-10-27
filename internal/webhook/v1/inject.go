@@ -114,6 +114,15 @@ func addProxy(pod *corev1.Pod, req injectionRequest) {
 	if mint := resolveMintURL(req); mint != "" {
 		env = append(env, corev1.EnvVar{Name: "MINT_URL", Value: mint})
 	}
+	if req.AuthTokenSecret != "" {
+		// Downstream bearer check + upstream forwarding (single-key secret,
+		// key "value" — same layout as the internal token secret). Works in
+		// full and standalone mode: standalone enforces the downstream check
+		// only, full mode additionally presents the token upstream.
+		env = append(env, corev1.EnvVar{
+			Name: "MEDIA_AUTH_TOKEN", ValueFrom: secretKeyRef(req.AuthTokenSecret),
+		})
+	}
 
 	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
 		Name:  proxyName,

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -261,6 +263,81 @@ func TestErrorMessagesNeverEmbedRawURLs(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "user:") {
 		t.Errorf("error leaks credentials: %v", err)
+	}
+}
+
+// TestLoadConfigAuthToken covers the optional MEDIA_AUTH_TOKEN: absent is
+// fine (auth disabled), a 32+ char token enables auth, anything shorter is
+// rejected so misconfig fails at startup rather than at upstream connect.
+func TestLoadConfigAuthToken(t *testing.T) {
+	valid := map[string]string{
+		"PROXY_MODE":           "full",
+		"UPSTREAM_MCP_URL":     "http://up:7777",
+		"MINT_URL":             "http://mint:8091",
+		"MEDIA_INTERNAL_TOKEN": "tok",
+	}
+
+	cfg, err := loadConfig(mapEnv(t, valid))
+	if err != nil {
+		t.Fatalf("loadConfig without MEDIA_AUTH_TOKEN: %v", err)
+	}
+	if cfg.AuthToken != "" {
+		t.Errorf("AuthToken = %q, want empty", cfg.AuthToken)
+	}
+
+	long := merge(valid, "MEDIA_AUTH_TOKEN", strings.Repeat("a", 32))
+	cfg, err = loadConfig(mapEnv(t, long))
+	if err != nil {
+		t.Fatalf("loadConfig with 32-char token: %v", err)
+	}
+	if cfg.AuthToken != strings.Repeat("a", 32) {
+		t.Errorf("AuthToken = %q", cfg.AuthToken)
+	}
+
+	short := merge(valid, "MEDIA_AUTH_TOKEN", "short-token")
+	if _, err := loadConfig(mapEnv(t, short)); err == nil {
+		t.Fatal("expected error for short MEDIA_AUTH_TOKEN")
+	} else if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("error %q does not mention length", err)
+	}
+}
+
+// TestBearerAuth pins the downstream middleware contract: missing or wrong
+// Authorization headers get 401 (with a WWW-Authenticate challenge so MCP
+// clients surface an auth prompt), a matching Bearer token passes through.
+func TestBearerAuth(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef0123"
+	reached := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	h := bearerAuth(token, next)
+
+	do := func(header string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := do(""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no header: got %d, want 401", rec.Code)
+	}
+	if rec := do("Bearer wrong"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token: got %d, want 401", rec.Code)
+	}
+	if got := do("Bearer " + token); got.Code != http.StatusOK {
+		t.Errorf("correct token: got %d, want 200", got.Code)
+	}
+	if !reached {
+		t.Error("next handler not reached with correct token")
+	}
+	if rec := do(""); rec.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Error("missing WWW-Authenticate: Bearer challenge on 401")
 	}
 }
 

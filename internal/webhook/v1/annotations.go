@@ -28,6 +28,12 @@ const (
 	// MintURL overrides the proxy MINT_URL (default: localhost:8091 when
 	// the sidecar lives in the same pod).
 	MintURL = "media.media/mint-url"
+	// AuthTokenSecret names the namespace-local secret whose "value" key
+	// becomes the injected proxy's MEDIA_AUTH_TOKEN: downstream clients
+	// must present "Authorization: Bearer <token>" and the same token is
+	// forwarded to the upstream MCP server (for auth-enforcing upstreams).
+	// Optional — unset means the proxy serves without client auth.
+	AuthTokenSecret = "media.media/auth-token-secret"
 	// PublicURL sets MEDIA_PUBLIC_BASE_URL on the sidecar.
 	PublicURL = "media.media/public-url"
 	// InlineMaxBytes overrides the proxy INLINE_MAX_BYTES.
@@ -56,17 +62,18 @@ const (
 // annotations. Parse is the single boundary: downstream code reads typed
 // fields only.
 type injectionRequest struct {
-	InjectSidecar  bool
-	InjectProxy    bool
-	VolumeName     string // PVC claim name; "" → emptyDir
-	VolumePath     string
-	UpstreamPort   string // "" → not set
-	ProxyMode      string // "" → "full" (proxy default)
-	ToolMatch      string // "" → enrichment disabled
-	MintURL        string // explicit override; "" → derived
-	PublicURL      string // sidecar MEDIA_PUBLIC_BASE_URL
-	InlineMaxBytes string // raw; validated by the proxy itself
-	Group          string // split topology; "" → single-pod
+	InjectSidecar   bool
+	InjectProxy     bool
+	VolumeName      string // PVC claim name; "" → emptyDir
+	VolumePath      string
+	UpstreamPort    string // "" → not set
+	ProxyMode       string // "" → "full" (proxy default)
+	ToolMatch       string // "" → enrichment disabled
+	MintURL         string // explicit override; "" → derived
+	PublicURL       string // sidecar MEDIA_PUBLIC_BASE_URL
+	InlineMaxBytes  string // raw; validated by the proxy itself
+	Group           string // split topology; "" → single-pod
+	AuthTokenSecret string // proxy MEDIA_AUTH_TOKEN source secret; "" → no auth
 }
 
 // sidecarImage / proxyImage / secret names are injected at webhook startup
@@ -115,6 +122,7 @@ func parseAnnotations(annotations map[string]string) (injectionRequest, error) {
 	req.PublicURL = annotations[PublicURL]
 	req.InlineMaxBytes = annotations[InlineMaxBytes]
 	req.Group = annotations[Group]
+	req.AuthTokenSecret = annotations[AuthTokenSecret]
 
 	if req.InjectSidecar && req.VolumeName != "" && req.VolumeName != "empty" &&
 		!isRFC1123Label(req.VolumeName) {
@@ -124,6 +132,9 @@ func parseAnnotations(annotations map[string]string) (injectionRequest, error) {
 		if _, err := strconv.Atoi(req.UpstreamPort); err != nil {
 			return req, fmt.Errorf("%s %q is not a port number", UpstreamPort, req.UpstreamPort)
 		}
+	}
+	if req.InjectProxy && req.AuthTokenSecret != "" && !isRFC1123Label(req.AuthTokenSecret) {
+		return req, fmt.Errorf("%s %q is not a valid secret name", AuthTokenSecret, req.AuthTokenSecret)
 	}
 	return req, nil
 }
