@@ -1,0 +1,31 @@
+# Mirrors CI (ci.yml): gitleaks + hygiene + gofumpt v0.9.2.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # Helm templates are Go-templated YAML, not parseable YAML;
+        # kubebuilder manifests bundle multiple YAML documents per file.
+        exclude: '(^|/)templates/'
+        args: [-m]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: gofumpt
+        name: gofumpt (parity with ci.yml)
+        # Some dev shells (and hook sandboxes) miss go even though the repo
+        # builds with it; try the common local-install path first.
+        entry: bash -c 'command -v go >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"; out="$(go run mvdan.cc/gofumpt@v0.9.2 -l .)"; [ -z "$out" ] || { echo "$out"; exit 1; }'
+        language: system
+        pass_filenames: false
+        types: [go]
