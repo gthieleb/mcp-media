@@ -111,6 +111,12 @@ func addProxy(pod *corev1.Pod, req injectionRequest) {
 	if req.InlineMaxBytes != "" {
 		env = append(env, corev1.EnvVar{Name: "INLINE_MAX_BYTES", Value: req.InlineMaxBytes})
 	}
+	if req.FetchBaseURL != "" {
+		// Inline inclusion fetches minted URLs from inside the cluster;
+		// when the public host is unreachable there (split topology, no
+		// MagicDNS), this base swaps scheme+host for the fetch only.
+		env = append(env, corev1.EnvVar{Name: "MEDIA_FETCH_BASE_URL", Value: req.FetchBaseURL})
+	}
 	if mint := resolveMintURL(req); mint != "" {
 		env = append(env, corev1.EnvVar{Name: "MINT_URL", Value: mint})
 	}

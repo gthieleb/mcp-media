@@ -68,6 +68,8 @@ var _ = Describe("Pod Webhook", func() {
 			{"default", "ws-proxy"},
 			{"default", "ws-proxy-standalone"},
 			{"default", "ws-proxy-auth"},
+			{"default", "ws-proxy-fetch"},
+			{"default", "ws-proxy-no-fetch"},
 			{"default", "ws-both"},
 			{"default", "ws-sidecar-pinned"},
 			{"media-disabled", "plain-pod"},
@@ -206,6 +208,45 @@ var _ = Describe("Pod Webhook", func() {
 			Expect(hasEnvFromSecret(pc, "media-internal-token")).To(BeTrue())
 			// No auth-token-secret annotation → no MEDIA_AUTH_TOKEN env.
 			Expect(hasEnvKey(pc, "MEDIA_AUTH_TOKEN")).To(BeFalse())
+		})
+
+		It("Should inject MEDIA_FETCH_BASE_URL from the fetch-base-url annotation", func() {
+			By("creating a pod annotated with inject-proxy and fetch-base-url")
+			pod := annotatedPod("default", "ws-proxy-fetch", map[string]string{
+				InjectProxy:  "true",
+				UpstreamPort: "5777",
+				FetchBaseURL: "http://whatsapp-mcp-go-wa-bridge-media:8090",
+			})
+			Expect(k8sClient.Create(ctx, pod)).NotTo(HaveOccurred())
+
+			By("verifying the proxy carries MEDIA_FETCH_BASE_URL")
+			var got *corev1.Pod
+			Eventually(func() bool {
+				var err error
+				got, err = fetchPod(pod)
+				if err != nil {
+					return false
+				}
+				return findContainer(got, proxyContainerName) != nil
+			}, timeout, interval).Should(BeTrue())
+			pc := findContainer(got, proxyContainerName)
+			Expect(envValue(pc, "MEDIA_FETCH_BASE_URL")).To(Equal("http://whatsapp-mcp-go-wa-bridge-media:8090"))
+
+			By("leaving the env absent when the annotation is unset")
+			plain := annotatedPod("default", "ws-proxy-no-fetch", map[string]string{
+				InjectProxy: "true",
+			})
+			Expect(k8sClient.Create(ctx, plain)).NotTo(HaveOccurred())
+			var plainGot *corev1.Pod
+			Eventually(func() bool {
+				var err error
+				plainGot, err = fetchPod(plain)
+				if err != nil {
+					return false
+				}
+				return findContainer(plainGot, proxyContainerName) != nil
+			}, timeout, interval).Should(BeTrue())
+			Expect(hasEnvKey(findContainer(plainGot, proxyContainerName), "MEDIA_FETCH_BASE_URL")).To(BeFalse())
 		})
 
 		It("Should inject MEDIA_AUTH_TOKEN from the auth-token-secret annotation", func() {

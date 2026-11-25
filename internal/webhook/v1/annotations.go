@@ -28,6 +28,12 @@ const (
 	// MintURL overrides the proxy MINT_URL (default: localhost:8091 when
 	// the sidecar lives in the same pod).
 	MintURL = "media.media/mint-url"
+	// FetchBaseURL overrides the proxy MEDIA_FETCH_BASE_URL: an internal
+	// base replacing scheme+host of minted URLs for inline inclusion. Set
+	// it to the sidecar serve Service when the public host is not
+	// resolvable in-cluster. Optional — unset means inline fetches use the
+	// minted URL as-is.
+	FetchBaseURL = "media.media/fetch-base-url"
 	// AuthTokenSecret names the namespace-local secret whose "value" key
 	// becomes the injected proxy's MEDIA_AUTH_TOKEN: downstream clients
 	// must present "Authorization: Bearer <token>" and the same token is
@@ -70,6 +76,7 @@ type injectionRequest struct {
 	ProxyMode       string // "" → "full" (proxy default)
 	ToolMatch       string // "" → enrichment disabled
 	MintURL         string // explicit override; "" → derived
+	FetchBaseURL    string // proxy MEDIA_FETCH_BASE_URL; "" → fetch minted URLs as-is
 	PublicURL       string // sidecar MEDIA_PUBLIC_BASE_URL
 	InlineMaxBytes  string // raw; validated by the proxy itself
 	Group           string // split topology; "" → single-pod
@@ -119,6 +126,7 @@ func parseAnnotations(annotations map[string]string) (injectionRequest, error) {
 	req.ProxyMode = annotations[ProxyMode]
 	req.ToolMatch = annotations[ToolMatch]
 	req.MintURL = annotations[MintURL]
+	req.FetchBaseURL = annotations[FetchBaseURL]
 	req.PublicURL = annotations[PublicURL]
 	req.InlineMaxBytes = annotations[InlineMaxBytes]
 	req.Group = annotations[Group]
