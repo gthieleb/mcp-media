@@ -143,6 +143,7 @@ Overrides: `media.media/ingress-class` / `ingress-host` / `cert-issuer` /
 | `media.media/proxy-mode` | `full` | `standalone` = generic tools only (agent pods) |
 | `media.media/tool-match` | — | regex for the enrichment middleware (full mode only) |
 | `media.media/mint-url` | derived | explicit proxy `MINT_URL` override |
+| `media.media/fetch-base-url` | — | explicit proxy `MEDIA_FETCH_BASE_URL` override; internal base replacing scheme+host of minted URLs for inline inclusion (set it to the sidecar serve Service when the public host is not resolvable in-cluster) |
 | `media.media/public-url` | derived | `MEDIA_PUBLIC_BASE_URL` in the sidecar |
 | `media.media/inline-max-bytes` | `102400` | base64-inline limit |
 | `media.media/group` | — | links sidecar + proxy across deployments (split) |
